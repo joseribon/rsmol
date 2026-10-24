@@ -18,6 +18,7 @@ use atoms::{SphereInstance, StickInstance};
 use bytemuck::{Pod, Zeroable};
 use rsmol_core::backbone::{self, Trace};
 use rsmol_core::display::{Display, Reps};
+use rsmol_core::surface::{self, SurfaceMesh};
 use rsmol_core::{Structure, Vec3};
 use wgpu::util::DeviceExt;
 
@@ -94,6 +95,15 @@ struct GpuMesh {
     count: u32,
 }
 
+/// Identifies a surface: which structure (by address and size), state, and atoms.
+#[derive(PartialEq)]
+struct SurfaceKey {
+    structure: usize,
+    atom_count: usize,
+    state: usize,
+    atoms: Vec<usize>,
+}
+
 /// Render targets that depend on the viewport size.
 struct Targets {
     scene: wgpu::TextureView,
@@ -118,6 +128,10 @@ pub struct Renderer {
     joints: Option<Instances>,
     sticks: Option<Instances>,
     cartoon: Option<GpuMesh>,
+    surface: Option<GpuMesh>,
+    /// The last computed surface, reused while the same atoms are surfaced so that recoloring
+    /// does not recompute the density grid.
+    surface_cache: Option<(SurfaceKey, SurfaceMesh)>,
     markers: Option<Instances>,
     targets: Targets,
     pub style: Style,
@@ -301,6 +315,8 @@ impl Renderer {
             joints: None,
             sticks: None,
             cartoon: None,
+            surface: None,
+            surface_cache: None,
             markers: None,
             targets,
             style: Style::default(),
@@ -319,6 +335,7 @@ impl Renderer {
         self.joints = None;
         self.sticks = None;
         self.cartoon = None;
+        self.surface = None;
         let Some(coords) = structure.coords(state) else { return };
 
         // Cartoon for runs of residues whose guide atom is shown as cartoon. Sticks may attach
@@ -349,6 +366,7 @@ impl Renderer {
             });
         }
 
+        self.surface = self.build_surface(device, structure, display, state);
         self.spheres = upload(device, "spheres", &atoms::spheres(structure, coords, display));
         let (joints, sticks) = atoms::sticks(structure, coords, display, &anchors);
         self.joints = upload(device, "stick joints", &joints);
@@ -414,7 +432,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.scene_bind_group, &[]);
-            if let Some(mesh) = &self.cartoon {
+            for mesh in [&self.cartoon, &self.surface].into_iter().flatten() {
                 pass.set_pipeline(&self.mesh_pipeline);
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -459,6 +477,47 @@ impl Renderer {
 }
 
 impl Renderer {
+    /// Gaussian surface over the atoms shown as surface, colored per dominant atom.
+    fn build_surface(&mut self, device: &wgpu::Device, s: &Structure, display: &Display, state: usize) -> Option<GpuMesh> {
+        let coords = s.coords(state)?;
+        let atoms: Vec<usize> = (0..coords.len()).filter(|&i| display.reps[i].contains(Reps::SURFACE)).collect();
+        if atoms.is_empty() {
+            self.surface_cache = None;
+            return None;
+        }
+        let key = SurfaceKey { structure: s as *const Structure as usize, atom_count: s.atom_count(), state, atoms };
+        if self.surface_cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            let radii: Vec<f32> = s.atoms.element.iter().map(|&e| style::vdw_radius(e)).collect();
+            let mesh = surface::gaussian_surface(coords, &radii, &key.atoms, Default::default());
+            self.surface_cache = Some((key, mesh));
+        }
+        let (_, mesh) = self.surface_cache.as_ref()?;
+        let vertices: Vec<cartoon::MeshVertex> = (0..mesh.positions.len())
+            .map(|v| {
+                let atom = mesh.atoms[v] as usize;
+                cartoon::MeshVertex {
+                    position: mesh.positions[v],
+                    normal: mesh.normals[v],
+                    color: display.colors[atom],
+                    id: atoms::pick_id(atom),
+                }
+            })
+            .collect();
+        (!mesh.indices.is_empty()).then(|| GpuMesh {
+            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("surface vertices"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("surface indices"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            }),
+            count: mesh.indices.len() as u32,
+        })
+    }
+
     /// The atom drawn at pixel (`x`, `y`) of the last rendered frame, if any. Blocks until the
     /// GPU has copied that one pixel back.
     pub fn pick(&self, device: &wgpu::Device, queue: &wgpu::Queue, x: u32, y: u32) -> Option<usize> {

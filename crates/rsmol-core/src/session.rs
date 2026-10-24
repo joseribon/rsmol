@@ -3,7 +3,7 @@
 //!   select [<name>,] <selection>     store (default "sele") and highlight
 //!   deselect                         clear "sele" and the highlight
 //!   zoom [<selection>]               frame the selection, or everything
-//!   show <rep> [, <selection>]       add a representation (spheres, sticks, cartoon)
+//!   show <rep> [, <selection>]       add a representation (spheres, sticks, cartoon, surface)
 //!   hide <rep|everything> [, <sel>]  remove representations
 //!   as <rep> [, <selection>]         show only that representation
 //!   color <color> [, <selection>]    a name or #rrggbb, or a scheme: bychain, byelement,
@@ -28,6 +28,7 @@ const DEFAULT_SELECTION: &str = "sele";
 pub const PRESETS: &[(&str, &str)] = &[
     ("Cartoon + ligands", "hide everything; show cartoon; show sticks, not polymer and not solvent"),
     ("Cartoon", "hide everything; show cartoon"),
+    ("Surface", "hide everything; show surface, polymer; show sticks, not polymer and not solvent"),
     ("Sticks", "hide everything; show sticks, not solvent"),
     ("Spheres", "hide everything; show spheres, not solvent"),
 ];
@@ -120,7 +121,7 @@ fn parse_command(text: &str, offset: usize) -> Result<Command<'_>, SelectionErro
 
     let rep_and_sel = |what: &str| -> Result<(Reps, Option<Arg>), SelectionError> {
         if args.text.is_empty() {
-            return Err(error(end..end, format!("{what} needs a representation: spheres, sticks or cartoon")));
+            return Err(error(end..end, format!("{what} needs a representation: spheres, sticks, cartoon or surface")));
         }
         let (rep, sel) = split_comma(args);
         let reps = Reps::from_name(rep.text)
@@ -341,6 +342,7 @@ fn rep_label(reps: Reps) -> &'static str {
         Reps::SPHERES => "spheres",
         Reps::STICKS => "sticks",
         Reps::CARTOON => "cartoon",
+        Reps::SURFACE => "surface",
         _ => "everything",
     }
 }

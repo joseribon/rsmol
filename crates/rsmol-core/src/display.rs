@@ -19,7 +19,8 @@ impl Reps {
     pub const SPHERES: Reps = Reps(1);
     pub const STICKS: Reps = Reps(2);
     pub const CARTOON: Reps = Reps(4);
-    pub const ALL: Reps = Reps(7);
+    pub const SURFACE: Reps = Reps(8);
+    pub const ALL: Reps = Reps(15);
 
     pub fn contains(self, other: Reps) -> bool {
         self.0 & other.0 == other.0
@@ -39,6 +40,7 @@ impl Reps {
             "spheres" | "sphere" | "vdw" => Reps::SPHERES,
             "sticks" | "stick" | "licorice" => Reps::STICKS,
             "cartoon" | "cartoons" | "ribbon" => Reps::CARTOON,
+            "surface" | "surfaces" | "surf" => Reps::SURFACE,
             "everything" | "all" => Reps::ALL,
             _ => return None,
         })

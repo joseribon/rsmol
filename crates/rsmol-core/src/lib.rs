@@ -12,6 +12,7 @@ pub mod io;
 pub mod select;
 pub mod session;
 pub mod spatial;
+pub mod surface;
 mod structure;
 
 pub use element::Element;

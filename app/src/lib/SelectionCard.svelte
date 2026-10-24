@@ -9,6 +9,7 @@
     { label: "Sticks", command: "show sticks, sele", hint: "Add sticks" },
     { label: "Spheres", command: "show spheres, sele", hint: "Add van der Waals spheres" },
     { label: "Cartoon", command: "show cartoon, sele", hint: "Add cartoon" },
+    { label: "Surface", command: "show surface, sele", hint: "Add a molecular surface" },
     { label: "Hide", command: "hide everything, sele", hint: "Hide every representation" },
   ];
 
