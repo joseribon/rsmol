@@ -3423,7 +3423,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "objc2 0.6.5",
@@ -3444,7 +3444,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "flate2",
@@ -3454,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "png",
@@ -3470,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3481,7 +3481,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-viewer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "png",
