@@ -12,6 +12,7 @@
 //!   angle [<name>,] <a>, <b>, <c>    angle at <b>
 //!   dihedral [<name>,] <a>, …, <d>   torsion about <b>–<c>
 //!   delete <name>|all                remove a measurement or named selection
+//!   undo / redo                      step back or forward through changes
 //!   <selection>                      same as `select <selection>`
 //!
 //! Commands separated by `;` run in order. Every line can be dry-run, which evaluates without
@@ -44,7 +45,20 @@ pub struct Session {
     pub display: Option<Display>,
     pub named: HashMap<String, AtomSet>,
     pub measurements: Vec<Measurement>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
 }
+
+/// Everything a command can change; the camera is deliberately not part of undo.
+#[derive(Clone, PartialEq)]
+struct Snapshot {
+    display: Option<Display>,
+    named: HashMap<String, AtomSet>,
+    measurements: Vec<Measurement>,
+}
+
+/// Undo steps kept. A display snapshot is about 5 bytes per atom (1.2 MB for a ribosome).
+const UNDO_LIMIT: usize = 50;
 
 /// What a front end must update after a command.
 #[derive(Clone, Debug, PartialEq)]
@@ -256,18 +270,86 @@ impl Session {
         self.structure = Some(structure);
         self.named.clear();
         self.measurements.clear();
+        self.undo.clear();
+        self.redo.clear();
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { display: self.display.clone(), named: self.named.clone(), measurements: self.measurements.clone() }
+    }
+
+    fn restore(&mut self, s: Snapshot) -> Vec<Effect> {
+        self.display = s.display;
+        self.named = s.named;
+        self.measurements = s.measurements;
+        let sele = self.named.get(DEFAULT_SELECTION).map(|set| set.iter().collect()).unwrap_or_default();
+        vec![Effect::Display, Effect::Measurements, Effect::Highlight(sele)]
+    }
+
+    /// Steps back (`undo`) or forward through changes.
+    fn step(&mut self, undo: bool, dry_run: bool) -> Result<Outcome, SelectionError> {
+        let verb = if undo { "undo" } else { "redo" };
+        let available = if undo { self.undo.len() } else { self.redo.len() };
+        if available == 0 {
+            return Err(error(0..verb.len(), format!("nothing to {verb}")));
+        }
+        let message = format!("{verb} ({} more)", available - 1);
+        let effects = if dry_run {
+            Vec::new()
+        } else {
+            let current = self.snapshot();
+            let target = if undo { self.undo.pop() } else { self.redo.pop() }.unwrap();
+            if undo { self.redo.push(current) } else { self.undo.push(current) }
+            self.restore(target)
+        };
+        Ok(Outcome { message, canonical: None, atoms: None, effects })
     }
 
     /// Runs one line, which may hold several `;`-separated commands. A dry run reports what the
     /// last command would do; a real run stops at the first error.
+    ///
+    /// A line that changes anything is one undo step, even when it holds several commands or
+    /// fails partway (undo then reverts the commands that did run).
     pub fn run(&mut self, text: &str, dry_run: bool) -> Result<Outcome, SelectionError> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "undo" => return self.step(true, dry_run),
+            "redo" => return self.step(false, dry_run),
+            _ => {}
+        }
+        let before = (!dry_run).then(|| self.snapshot());
         let mut last = None;
         let mut effects = Vec::new();
+        let mut result = Ok(());
         for (part, offset) in split_commands(text).filter(|(p, _)| !p.trim().is_empty()) {
-            let mut outcome = self.run_one(part, offset, dry_run)?;
-            effects.append(&mut outcome.effects);
-            last = Some(outcome);
+            match self.run_one(part, offset, dry_run) {
+                Ok(mut outcome) => {
+                    effects.append(&mut outcome.effects);
+                    last = Some(outcome);
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
         }
+        if let Some(before) = before
+            && before != self.snapshot()
+        {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_LIMIT {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+        result?;
         let mut outcome = last.ok_or_else(|| error(0..text.len(), "nothing to run"))?;
         outcome.effects = effects;
         Ok(outcome)
@@ -583,6 +665,44 @@ HETATM    7 ZN    ZN A 101       9.000   0.000   0.000  1.00  0.00          ZN
         assert_eq!(err.message, "expected exactly one atom, got 2");
         assert!(s.run("angle index 1, index 2", true).unwrap_err().message.starts_with("angle takes [name,] then 3"));
         assert_eq!(s.run("delete nope", true).unwrap_err().message, "no measurement or selection named 'nope'");
+    }
+
+    #[test]
+    fn undo_and_redo() {
+        let mut s = session();
+        let original = reps(&s);
+        s.run("hide everything; show sticks, resi 1", false).unwrap();
+        let sticks = reps(&s);
+        s.run("color coral; distance index 2, index 5", false).unwrap();
+        // Camera-only and dry-run commands are not undo steps.
+        s.run("zoom resi 1", false).unwrap();
+        s.run("show spheres", true).unwrap();
+
+        let out = s.run("undo", false).unwrap();
+        assert_eq!(out.message, "undo (1 more)");
+        assert!(s.measurements.is_empty());
+        assert_eq!(reps(&s), sticks);
+        s.run("undo", false).unwrap();
+        assert_eq!(reps(&s), original);
+        assert_eq!(s.run("undo", false).unwrap_err().message, "nothing to undo");
+
+        s.run("redo", false).unwrap();
+        assert_eq!(reps(&s), sticks);
+        // A new change discards the redo history.
+        s.run("select metals", false).unwrap();
+        assert_eq!(s.run("redo", false).unwrap_err().message, "nothing to redo");
+        s.run("undo", false).unwrap();
+        assert!(!s.named.contains_key("sele"));
+    }
+
+    #[test]
+    fn partially_failed_lines_are_undoable() {
+        let mut s = session();
+        let original = reps(&s);
+        assert!(s.run("hide everything; show bogus", false).is_err());
+        assert_ne!(reps(&s), original);
+        s.run("undo", false).unwrap();
+        assert_eq!(reps(&s), original);
     }
 
     #[test]

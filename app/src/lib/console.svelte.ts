@@ -33,6 +33,8 @@ export const consoleState = $state({
   /** The atom under the pointer and where to show its tooltip (CSS pixels). */
   hover: null as { info: PickInfo; x: number; y: number } | null,
   measurements: [] as MeasurementSummary[],
+  canUndo: false,
+  canRedo: false,
   /** Measure tool: atoms picked so far, or null when the tool is off. */
   measuring: null as PickInfo[] | null,
 });
@@ -67,7 +69,7 @@ export async function execute(input: string, { dryRun = false, logErrors = true 
     // Downloading happens in the app, not the core session, so `fetch` is handled here.
     const id = fetchMatch[1].toUpperCase();
     outcome = dryRun
-      ? { ok: true, value: { message: `fetch ${id} from the RCSB PDB`, canonical: null, atoms: null, selection: null, measurements: [] } }
+      ? { ok: true, value: { ...emptyResult(), message: `fetch ${id} from the RCSB PDB` } }
       : await fetchEntry(id);
   } else {
     try {
@@ -80,6 +82,8 @@ export async function execute(input: string, { dryRun = false, logErrors = true 
   if (outcome.ok) {
     consoleState.selection = outcome.value.selection;
     consoleState.measurements = outcome.value.measurements;
+    consoleState.canUndo = outcome.value.can_undo;
+    consoleState.canRedo = outcome.value.can_redo;
     log({ input, output: outcome.value.message, ok: true });
   } else if (logErrors) {
     log({ input, output: outcome.error.message, ok: false });
@@ -102,7 +106,7 @@ async function fetchEntry(id: string): Promise<Outcome> {
   }
   remember({ kind: "fetch", id });
   const message = `${info.name}: ${info.atoms.toLocaleString("en-US")} atoms in ${info.parse_ms.toFixed(0)} ms`;
-  return { ok: true, value: { message, canonical: null, atoms: info.atoms, selection: null, measurements: [] } };
+  return { ok: true, value: { ...emptyResult(), message, atoms: info.atoms } };
 }
 
 export function reopen(r: Recent) {
@@ -119,6 +123,8 @@ async function loading(load: () => Promise<StructureInfo>): Promise<StructureInf
     consoleState.structure = info;
     consoleState.selection = null;
     consoleState.measurements = [];
+    consoleState.canUndo = false;
+    consoleState.canRedo = false;
     if (consoleState.measuring) consoleState.measuring = [];
     return info;
   } catch (e) {
@@ -127,6 +133,11 @@ async function loading(load: () => Promise<StructureInfo>): Promise<StructureInf
   } finally {
     consoleState.loading = false;
   }
+}
+
+/** A result for actions handled in the UI (fetch), with no session state attached. */
+function emptyResult(): CommandResult {
+  return { message: "", canonical: null, atoms: null, selection: null, measurements: [], can_undo: false, can_redo: false };
 }
 
 function log(entry: Entry) {

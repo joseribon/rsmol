@@ -52,6 +52,8 @@ export interface CommandResult {
   /** The "sele" selection after the command. */
   selection: SelectionSummary | null;
   measurements: MeasurementSummary[];
+  can_undo: boolean;
+  can_redo: boolean;
 }
 
 export interface PickInfo {

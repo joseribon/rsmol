@@ -201,6 +201,8 @@ struct CommandResult {
     /// The "sele" selection after the command, for the selection card.
     selection: Option<SelectionSummary>,
     measurements: Vec<MeasurementSummary>,
+    can_undo: bool,
+    can_redo: bool,
 }
 
 /// Runs a command-bar line. With `dry_run`, only reports what it would do, for live feedback.
@@ -232,7 +234,15 @@ fn run_command(
     });
     let measurements =
         session.measurements.iter().map(|m| MeasurementSummary { name: m.name.clone(), label: m.label() }).collect();
-    Ok(CommandResult { message: outcome.message, canonical: outcome.canonical, atoms: outcome.atoms, selection, measurements })
+    Ok(CommandResult {
+        message: outcome.message,
+        canonical: outcome.canonical,
+        atoms: outcome.atoms,
+        selection,
+        measurements,
+        can_undo: session.can_undo(),
+        can_redo: session.can_redo(),
+    })
 }
 
 /// A structure path passed on the command line, if any.

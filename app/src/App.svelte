@@ -35,9 +35,15 @@
   }
 
   // M toggles the measure tool and Escape leaves it, unless focus is in a text field.
+  // ⌘Z / ⇧⌘Z undo and redo, except in the command bar, where they edit the text.
   function onkeydown(e: KeyboardEvent) {
     if (e.target instanceof HTMLInputElement || !consoleState.structure) return;
-    if (e.key === "m" || e.key === "M") toggleMeasuring();
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      execute(e.shiftKey ? "redo" : "undo", { logErrors: false });
+    } else if (e.metaKey || e.ctrlKey) {
+      return;
+    } else if (e.key === "m" || e.key === "M") toggleMeasuring();
     else if (e.key === "Escape" && consoleState.measuring) consoleState.measuring = null;
   }
 
@@ -73,6 +79,20 @@
 
 {#if info}
   <div class="tools">
+    {#if consoleState.canUndo || consoleState.canRedo}
+      <div class="tool-group panel">
+        <button title="Undo (⌘Z)" aria-label="Undo" disabled={!consoleState.canUndo} onclick={() => execute("undo")}>
+          <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+            <path d="M5 3.5 2 6.5l3 3M2.5 6.5h6a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+        <button title="Redo (⇧⌘Z)" aria-label="Redo" disabled={!consoleState.canRedo} onclick={() => execute("redo")}>
+          <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+            <path d="M9 3.5l3 3-3 3M11.5 6.5h-6a3.5 3.5 0 0 0 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </div>
+    {/if}
     <button
       class="tool panel"
       class:active={consoleState.measuring !== null}
@@ -365,6 +385,28 @@
   }
   .tool:hover {
     color: var(--text);
+  }
+  .tool-group {
+    display: flex;
+    padding: 2px;
+  }
+  .tool-group button {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 26px;
+    border: none;
+    border-radius: 7px;
+    background: none;
+    color: var(--text-muted);
+  }
+  .tool-group button:hover:not(:disabled) {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .tool-group button:disabled {
+    opacity: 0.35;
+    cursor: default;
   }
   .tool.active {
     color: #1a1406;
