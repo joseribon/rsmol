@@ -3,6 +3,7 @@
 //! This crate has no UI or GPU dependencies so it can be used from the desktop app, WASM and
 //! the Python bindings alike.
 
+pub mod backbone;
 mod element;
 pub mod io;
 pub mod select;

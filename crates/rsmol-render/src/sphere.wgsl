@@ -1,12 +1,5 @@
 // Ray-cast sphere impostors: one camera-facing quad per atom, with the exact sphere surface and
-// depth computed per fragment.
-
-struct Uniforms {
-    view: mat4x4<f32>,
-    proj: mat4x4<f32>,
-}
-
-@group(0) @binding(0) var<uniform> u: Uniforms;
+// depth computed per fragment. Prepended with common.wgsl.
 
 struct Instance {
     @location(0) center: vec3<f32>,
@@ -41,8 +34,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     out.view_pos = view_pos;
     out.center = center;
     out.radius = inst.radius;
-    // Colors arrive as sRGB bytes; lighting happens in linear space.
-    out.color = pow(inst.color.rgb, vec3(2.2));
+    out.color = srgb_to_linear(inst.color.rgb);
     return out;
 }
 
@@ -62,19 +54,9 @@ fn fs_main(in: VsOut) -> FsOut {
     let hit = dir * (b - sqrt(disc));
     let n = (hit - in.center) / in.radius;
 
-    // Headlight key light plus a soft fill from above, Blinn-Phong specular and a rim term that
-    // darkens silhouettes to give a cheap sense of depth until SSAO lands.
-    let v = -dir;
-    let key = normalize(vec3(0.3, 0.4, 1.0));
-    let fill = normalize(vec3(-0.5, 1.0, 0.2));
-    let diffuse = max(dot(n, key), 0.0) * 0.75 + max(dot(n, fill), 0.0) * 0.2;
-    let spec = pow(max(dot(n, normalize(key + v)), 0.0), 48.0) * 0.35;
-    let rim = mix(0.55, 1.0, smoothstep(0.0, 0.6, dot(n, v)));
-    let lit = (in.color * (0.18 + diffuse) + vec3(spec)) * rim;
-
     let clip = u.proj * vec4(hit, 1.0);
     var out: FsOut;
-    out.color = vec4(lit, 1.0);
+    out.color = vec4(shade(in.color, n, -dir), 1.0);
     out.depth = clip.z / clip.w;
     return out;
 }

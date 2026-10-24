@@ -2,7 +2,14 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { loadStructure, startupFile, type FrameStats, type StructureInfo } from "./lib/api";
+  import {
+    loadStructure,
+    setRepresentation,
+    startupFile,
+    type FrameStats,
+    type Representation,
+    type StructureInfo,
+  } from "./lib/api";
   import Viewport from "./lib/Viewport.svelte";
   import CommandBar from "./lib/CommandBar.svelte";
 
@@ -11,6 +18,18 @@
   let loading = $state(false);
   let error: string | null = $state(null);
   let dropping = $state(false);
+  // Matches the renderer's default.
+  let representation: Representation = $state("ligands");
+  const representations: { id: Representation; label: string; hint: string }[] = [
+    { id: "ligands", label: "Cartoon + ligands", hint: "Polymers as cartoon, ligands and ions as spheres" },
+    { id: "cartoon", label: "Cartoon", hint: "Polymers only" },
+    { id: "spheres", label: "Spheres", hint: "Every atom as a van der Waals sphere" },
+  ];
+
+  function choose(r: Representation) {
+    representation = r;
+    setRepresentation(r);
+  }
 
   async function open(path: string) {
     loading = true;
@@ -58,6 +77,17 @@
       <dt>States</dt><dd>{fmt(info.states)}</dd>
       <dt>Parsed</dt><dd>{info.parse_ms.toFixed(0)} ms</dd>
     </dl>
+    <div class="segmented" role="radiogroup" aria-label="Representation">
+      {#each representations as r}
+        <button
+          role="radio"
+          aria-checked={representation === r.id}
+          class:active={representation === r.id}
+          title={r.hint}
+          onclick={() => choose(r.id)}>{r.label}</button
+        >
+      {/each}
+    </div>
     <div class="chains">
       {#each info.chains.slice(0, 40) as chain}<span class="chip mono">{chain || "–"}</span>{/each}
       {#if info.chains.length > 40}<span class="more">+{info.chains.length - 40}</span>{/if}
@@ -143,6 +173,32 @@
     margin: 0;
     text-align: right;
     font-variant-numeric: tabular-nums;
+  }
+  .segmented {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 3px;
+    margin: 0 0 12px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .segmented button {
+    padding: 5px 8px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .segmented button:hover {
+    color: var(--text);
+  }
+  .segmented button.active {
+    background: rgba(95, 186, 168, 0.16);
+    color: var(--text);
   }
   .chains {
     display: flex;

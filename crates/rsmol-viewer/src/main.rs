@@ -1,16 +1,16 @@
 //! Standalone prototype viewer.
 //!
-//!   rsmol-viewer <structure.{pdb,cif}>                     interactive window
+//!   rsmol-viewer <structure.{pdb,cif}> [--repr spheres|cartoon|ligands]
 //!   rsmol-viewer <structure> --screenshot out.png [WxH]    render offscreen and exit
 //!
 //! Controls: left-drag rotates, right-drag (or shift+left-drag) pans, scroll zooms,
-//! R resets the view.
+//! R resets the view, 1/2/3 switch between spheres / cartoon / cartoon + ligands.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use rsmol_core::Structure;
-use rsmol_render::{Camera, Renderer};
+use rsmol_render::{Camera, Renderer, Representation};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -38,6 +38,16 @@ fn main() {
         t.elapsed()
     );
 
+    let representation = match args.iter().position(|a| a == "--repr").and_then(|i| args.get(i + 1)).map(String::as_str) {
+        None | Some("ligands") => Representation::CartoonAndLigands,
+        Some("cartoon") => Representation::Cartoon,
+        Some("spheres") => Representation::Spheres,
+        Some(other) => {
+            eprintln!("unknown representation {other:?}; expected spheres, cartoon or ligands");
+            std::process::exit(2);
+        }
+    };
+
     if let Some(i) = args.iter().position(|a| a == "--screenshot") {
         let out = args.get(i + 1).expect("--screenshot needs an output path");
         let (w, h) = args
@@ -45,12 +55,12 @@ fn main() {
             .and_then(|s| s.split_once('x'))
             .map(|(w, h)| (w.parse().unwrap(), h.parse().unwrap()))
             .unwrap_or((1600, 1000));
-        pollster::block_on(screenshot(&structure, out, w, h));
+        pollster::block_on(screenshot(&structure, representation, out, w, h));
         return;
     }
 
     let event_loop = EventLoop::new().unwrap();
-    let mut app = App { structure, gfx: None };
+    let mut app = App { structure, representation, gfx: None };
     event_loop.run_app(&mut app).unwrap();
 }
 
@@ -71,6 +81,7 @@ fn adapter_options<'a>(surface: Option<&'a wgpu::Surface<'a>>) -> wgpu::RequestA
 
 struct App {
     structure: Structure,
+    representation: Representation,
     gfx: Option<Gfx>,
 }
 
@@ -123,6 +134,7 @@ impl ApplicationHandler for App {
 
         let mut renderer = Renderer::new(&device, config.format, config.width, config.height);
         renderer.set_structure(&device, &self.structure, 0);
+        renderer.representation = self.representation;
         let camera = fitted_camera(&self.structure, config.width, config.height);
         self.gfx = Some(Gfx {
             window,
@@ -187,10 +199,15 @@ impl ApplicationHandler for App {
                 g.window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if event.logical_key == Key::Character("r".into()) {
-                    g.camera = fitted_camera(&self.structure, g.config.width, g.config.height);
-                    g.window.request_redraw();
+                let Key::Character(key) = &event.logical_key else { return };
+                match key.as_str() {
+                    "r" => g.camera = fitted_camera(&self.structure, g.config.width, g.config.height),
+                    "1" => g.renderer.representation = Representation::Spheres,
+                    "2" => g.renderer.representation = Representation::Cartoon,
+                    "3" => g.renderer.representation = Representation::CartoonAndLigands,
+                    _ => return,
                 }
+                g.window.request_redraw();
             }
             WindowEvent::RedrawRequested => g.draw(),
             _ => {}
@@ -246,7 +263,7 @@ impl FpsCounter {
 }
 
 /// Renders one frame offscreen and writes it as a PNG.
-async fn screenshot(structure: &Structure, out: &str, width: u32, height: u32) {
+async fn screenshot(structure: &Structure, representation: Representation, out: &str, width: u32, height: u32) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = instance.request_adapter(&adapter_options(None)).await.unwrap();
     let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
@@ -263,7 +280,10 @@ async fn screenshot(structure: &Structure, out: &str, width: u32, height: u32) {
     });
 
     let mut renderer = Renderer::new(&device, format, width, height);
+    let t = Instant::now();
     renderer.set_structure(&device, structure, 0);
+    println!("built representations in {:.1?}", t.elapsed());
+    renderer.representation = representation;
     let mut camera = fitted_camera(structure, width, height);
     // A slight tilt reads better than the raw file orientation.
     camera.orbit(-120.0, -60.0);

@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use rsmol_core::Structure;
-use rsmol_render::{Camera, Renderer};
+use rsmol_render::{Camera, Renderer, Representation};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, WebviewWindow};
 
@@ -24,8 +24,28 @@ pub enum CameraAction {
     Reset,
 }
 
+/// Representation names as the UI sends them.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepresentationArg {
+    Spheres,
+    Cartoon,
+    Ligands,
+}
+
+impl From<RepresentationArg> for Representation {
+    fn from(r: RepresentationArg) -> Self {
+        match r {
+            RepresentationArg::Spheres => Representation::Spheres,
+            RepresentationArg::Cartoon => Representation::Cartoon,
+            RepresentationArg::Ligands => Representation::CartoonAndLigands,
+        }
+    }
+}
+
 pub enum Msg {
     Camera(CameraAction),
+    Representation(Representation),
     Resize { width: u32, height: u32 },
     Load(Box<Structure>),
 }
@@ -150,6 +170,7 @@ impl ViewportState {
                 CameraAction::Zoom { factor } => self.camera.zoom(factor),
                 CameraAction::Reset => self.fit_camera(),
             },
+            Msg::Representation(r) => self.renderer.representation = r,
             Msg::Resize { width, height } => {
                 if width > 0 && height > 0 {
                     self.config.width = width;

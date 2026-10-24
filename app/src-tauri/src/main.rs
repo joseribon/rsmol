@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 use tauri::{Manager, State, WindowEvent};
-use viewport::{CameraAction, Msg};
+use viewport::{CameraAction, Msg, RepresentationArg};
 
 struct Viewport(Sender<Msg>);
 
@@ -59,6 +59,11 @@ fn camera(action: CameraAction, viewport: State<'_, Viewport>) -> Result<(), Str
     viewport.send(Msg::Camera(action))
 }
 
+#[tauri::command]
+fn set_representation(representation: RepresentationArg, viewport: State<'_, Viewport>) -> Result<(), String> {
+    viewport.send(Msg::Representation(representation.into()))
+}
+
 #[derive(Serialize)]
 struct SelectionErrorInfo {
     /// Character (not byte) offsets into the input, for the UI to underline.
@@ -97,7 +102,7 @@ fn main() {
             app.manage(Viewport(tx));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![load_structure, camera, parse_selection, startup_file])
+        .invoke_handler(tauri::generate_handler![load_structure, camera, set_representation, parse_selection, startup_file])
         .run(tauri::generate_context!())
         .expect("error while running rsmol");
 }

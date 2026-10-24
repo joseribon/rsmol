@@ -23,6 +23,8 @@ export type CameraAction =
   | { kind: "zoom"; factor: number }
   | { kind: "reset" };
 
+export type Representation = "spheres" | "cartoon" | "ligands";
+
 export interface FrameStats {
   frame_ms: number;
   gpu: string;
@@ -30,5 +32,7 @@ export interface FrameStats {
 
 export const loadStructure = (path: string) => invoke<StructureInfo>("load_structure", { path });
 export const camera = (action: CameraAction) => invoke<void>("camera", { action });
+export const setRepresentation = (representation: Representation) =>
+  invoke<void>("set_representation", { representation });
 export const parseSelection = (text: string) => invoke<string>("parse_selection", { text });
 export const startupFile = () => invoke<string | null>("startup_file");
