@@ -6,13 +6,14 @@ mod macos;
 mod viewport;
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rsmol_core::session::{Effect, PRESETS, Session};
 use serde::Serialize;
-use tauri::{Manager, State, WindowEvent};
+use tauri::{AppHandle, Manager, State, WindowEvent};
 use viewport::{CameraAction, Msg};
 
 struct Viewport(Sender<Msg>);
@@ -40,6 +41,50 @@ async fn load_structure(
     viewport: State<'_, Viewport>,
     session: State<'_, Mutex<Session>>,
 ) -> Result<StructureInfo, String> {
+    load(PathBuf::from(path), &viewport, &session).await
+}
+
+/// Downloads an entry from the RCSB PDB (cached on disk) and loads it.
+#[tauri::command]
+async fn fetch_structure(
+    id: String,
+    app: AppHandle,
+    viewport: State<'_, Viewport>,
+    session: State<'_, Mutex<Session>>,
+) -> Result<StructureInfo, String> {
+    let id = id.trim().to_ascii_uppercase();
+    if !is_pdb_id(&id) {
+        return Err(format!("'{id}' is not a PDB ID (four characters starting with a digit, e.g. 1HSG)"));
+    }
+    let cache = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("pdb");
+    let path = cache.join(format!("{id}.cif.gz"));
+    if !path.exists() {
+        let url = format!("https://files.rcsb.org/download/{id}.cif.gz");
+        let bytes = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
+            let mut response = ureq::get(&url).call().map_err(|e| match e {
+                ureq::Error::StatusCode(404) => format!("{id} was not found at the RCSB PDB"),
+                e => format!("download failed: {e}"),
+            })?;
+            // Large assemblies (ribosomes) exceed ureq's 10 MB default.
+            response.body_mut().with_config().limit(512 * 1024 * 1024).read_to_vec().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+        // Write then rename, so an interrupted download never leaves a truncated cache entry.
+        let partial = path.with_extension("partial");
+        std::fs::write(&partial, bytes).map_err(|e| e.to_string())?;
+        std::fs::rename(&partial, &path).map_err(|e| e.to_string())?;
+    }
+    load(path, &viewport, &session).await
+}
+
+/// Classic four-character PDB IDs, e.g. 1HSG.
+fn is_pdb_id(id: &str) -> bool {
+    id.len() == 4 && id.starts_with(|c: char| c.is_ascii_digit()) && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+async fn load(path: PathBuf, viewport: &Viewport, session: &Mutex<Session>) -> Result<StructureInfo, String> {
     let start = Instant::now();
     let parse_path = path.clone();
     let structure = tauri::async_runtime::spawn_blocking(move || rsmol_core::io::read(&parse_path))
@@ -49,7 +94,7 @@ async fn load_structure(
     let chains: BTreeSet<_> = structure.chains.iter().map(|c| c.id.clone()).collect();
     let info = StructureInfo {
         name: structure.name.clone(),
-        path,
+        path: path.to_string_lossy().into_owned(),
         atoms: structure.atom_count(),
         residues: structure.residues.len(),
         chains: chains.into_iter().collect(),
@@ -156,7 +201,19 @@ fn main() {
             app.manage(Mutex::new(Session::default()));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![load_structure, camera, presets, run_command, startup_file])
+        .invoke_handler(tauri::generate_handler![load_structure, fetch_structure, camera, presets, run_command, startup_file])
         .run(tauri::generate_context!())
         .expect("error while running rsmol");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pdb_ids() {
+        assert!(super::is_pdb_id("1HSG"));
+        assert!(super::is_pdb_id("4V6X"));
+        assert!(!super::is_pdb_id("HSG1"));
+        assert!(!super::is_pdb_id("1HS"));
+        assert!(!super::is_pdb_id("1H/G"));
+    }
 }

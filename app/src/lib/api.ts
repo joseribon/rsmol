@@ -47,6 +47,8 @@ export interface Preset {
 }
 
 export const loadStructure = (path: string) => invoke<StructureInfo>("load_structure", { path });
+/** Downloads a PDB entry from RCSB (cached on disk) and loads it. */
+export const fetchStructure = (id: string) => invoke<StructureInfo>("fetch_structure", { id });
 export const camera = (action: CameraAction) => invoke<void>("camera", { action });
 export const presets = () => invoke<Preset[]>("presets");
 /** Runs a command-bar line; `dryRun` reports what it would do without changing anything. */

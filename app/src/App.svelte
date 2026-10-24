@@ -2,35 +2,30 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { loadStructure, presets, startupFile, type FrameStats, type Preset, type StructureInfo } from "./lib/api";
-  import { execute, resetConsole } from "./lib/console.svelte";
+  import { presets, startupFile, type FrameStats, type Preset } from "./lib/api";
+  import { consoleState, execute, openFile, recentLabel, reopen } from "./lib/console.svelte";
   import { SCHEMES } from "./lib/palette";
   import Viewport from "./lib/Viewport.svelte";
   import CommandBar from "./lib/CommandBar.svelte";
   import SelectionCard from "./lib/SelectionCard.svelte";
 
-  let info: StructureInfo | null = $state(null);
+  const info = $derived(consoleState.structure);
   let stats: FrameStats | null = $state(null);
-  let loading = $state(false);
-  let error: string | null = $state(null);
   let dropping = $state(false);
+  const EXAMPLES = [
+    { id: "1HSG", hint: "HIV protease with indinavir" },
+    { id: "4HHB", hint: "Hemoglobin" },
+    { id: "1AON", hint: "GroEL–GroES chaperonin" },
+    { id: "6VXX", hint: "SARS-CoV-2 spike" },
+  ];
   let looks: Preset[] = $state([]);
   // The first preset matches the default display a structure loads with.
   let activeLook = $state(0);
 
-  async function open(path: string) {
-    loading = true;
-    error = null;
-    try {
-      info = await loadStructure(path);
-      activeLook = 0;
-      resetConsole();
-    } catch (e) {
-      error = String(e);
-    } finally {
-      loading = false;
-    }
-  }
+  // Every new structure starts with the default look, which is the first preset.
+  $effect(() => {
+    if (consoleState.structure) activeLook = 0;
+  });
 
   async function applyLook(index: number) {
     const outcome = await execute(looks[index].commands);
@@ -40,14 +35,14 @@
   onMount(() => {
     presets().then((p) => (looks = p));
     startupFile().then((path) => {
-      if (path) open(path);
+      if (path) openFile(path);
     });
     const unlisten = [
       listen<FrameStats>("viewport-frame", (e) => (stats = e.payload)),
       getCurrentWebview().onDragDropEvent((e) => {
         const { type } = e.payload;
         dropping = type === "enter" || type === "over";
-        if (e.payload.type === "drop" && e.payload.paths.length) open(e.payload.paths[0]);
+        if (e.payload.type === "drop" && e.payload.paths.length) openFile(e.payload.paths[0]);
       }),
     ];
     return () => unlisten.forEach((p) => p.then((f) => f()));
@@ -107,23 +102,46 @@
   </aside>
 {/if}
 
-{#if !info || dropping}
+{#if !info || dropping || consoleState.loading}
   <div class="empty" class:dropping>
     <div class="drop-target">
-      {#if loading}
+      {#if consoleState.loading}
+        <span class="spinner" aria-hidden="true"></span>
         Loading…
       {:else}
         <strong>Drop a structure file</strong>
-        <span>.cif · .mmcif · .pdb · .ent</span>
+        <span>.cif · .pdb · .gz — or type <code class="mono">fetch 1hsg</code></span>
+        {#if !dropping}
+          <div class="starts">
+            {#if consoleState.recent.length}
+              <h3>Recent</h3>
+              <div class="pills">
+                {#each consoleState.recent as r}
+                  <button title={r.kind === "file" ? r.path : `fetch ${r.id}`} onclick={() => reopen(r)}>
+                    {recentLabel(r)}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+            <h3>Try</h3>
+            <div class="pills">
+              {#each EXAMPLES as ex}
+                <button class="mono" title={`${ex.hint} — fetch ${ex.id}`} onclick={() => execute(`fetch ${ex.id}`)}>
+                  {ex.id}
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
 {/if}
 
-{#if error}
+{#if consoleState.error}
   <div class="toast panel" role="alert">
-    {error}
-    <button onclick={() => (error = null)} aria-label="Dismiss">×</button>
+    {consoleState.error}
+    <button onclick={() => (consoleState.error = null)} aria-label="Dismiss">×</button>
   </div>
 {/if}
 
@@ -269,6 +287,52 @@
     display: grid;
     place-items: center;
     pointer-events: none;
+  }
+  .starts {
+    margin-top: 14px;
+    pointer-events: auto;
+    text-align: center;
+  }
+  .starts h3 {
+    margin: 10px 0 6px;
+  }
+  .pills {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+    max-width: 360px;
+  }
+  .pills button {
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .pills button:hover {
+    border-color: var(--accent);
+    background: rgba(95, 186, 168, 0.12);
+  }
+  code {
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--text);
+  }
+  .spinner {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .drop-target {
     display: flex;

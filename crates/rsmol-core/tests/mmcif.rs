@@ -69,3 +69,16 @@ fn pdb_and_mmcif_agree() {
     assert_eq!(pdb.atoms.name, cif.atoms.name);
     assert_eq!(pdb.atoms.element, cif.atoms.element);
 }
+
+#[test]
+fn gzipped_files_parse_like_plain_ones() {
+    use std::io::Write;
+    let plain = std::fs::read(format!("{DATA}/two_models.cif")).unwrap();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&plain).unwrap();
+    let s = io::parse_bytes(&gz.finish().unwrap(), "2MOD.cif.gz").unwrap();
+    assert_eq!(s.name, "2MOD");
+    assert_eq!(s.states, fixture().states);
+    assert!(io::parse_bytes(b"not gzip", "x.cif.gz").unwrap_err().message.starts_with("not a valid gzip file"));
+    assert_eq!(io::parse_bytes(b"", "x.xyz").unwrap_err().message, "unknown structure format '.xyz'");
+}
