@@ -9,7 +9,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use rsmol_core::Structure;
-use rsmol_render::{Camera, Renderer, Representation};
+use rsmol_core::display::Display;
+use rsmol_render::{Camera, Renderer};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, WebviewWindow};
 
@@ -25,33 +26,14 @@ pub enum CameraAction {
     Reset,
 }
 
-/// Representation names as the UI sends them.
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RepresentationArg {
-    Spheres,
-    Sticks,
-    Cartoon,
-    Ligands,
-}
-
-impl From<RepresentationArg> for Representation {
-    fn from(r: RepresentationArg) -> Self {
-        match r {
-            RepresentationArg::Spheres => Representation::Spheres,
-            RepresentationArg::Sticks => Representation::Sticks,
-            RepresentationArg::Cartoon => Representation::Cartoon,
-            RepresentationArg::Ligands => Representation::CartoonAndLigands,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum Msg {
     Camera(CameraAction),
-    Representation(Representation),
     Resize { width: u32, height: u32 },
-    Load(Arc<Structure>),
+    /// A new structure and how to display it; resets the camera and markers.
+    Load(Arc<Structure>, Display),
+    /// New display state for the loaded structure.
+    Display(Display),
     /// Atoms to mark as selected; empty clears the markers.
     Highlight(Vec<usize>),
     /// Frame these atoms, or the whole structure for `None`.
@@ -178,7 +160,6 @@ impl ViewportState {
                 CameraAction::Zoom { factor } => self.camera.zoom(factor),
                 CameraAction::Reset => self.fit_camera(),
             },
-            Msg::Representation(r) => self.renderer.representation = r,
             Msg::Resize { width, height } => {
                 if width > 0 && height > 0 {
                     self.config.width = width;
@@ -187,10 +168,16 @@ impl ViewportState {
                     self.renderer.resize(&self.device, width, height);
                 }
             }
-            Msg::Load(structure) => {
-                self.renderer.set_structure(&self.device, &structure, 0);
+            Msg::Load(structure, display) => {
+                self.renderer.set_scene(&self.device, &structure, &display, 0);
+                self.renderer.set_highlight(&self.device, &[], []);
                 self.structure = Some(structure);
                 self.fit_camera();
+            }
+            Msg::Display(display) => {
+                if let Some(structure) = &self.structure {
+                    self.renderer.set_scene(&self.device, structure, &display, 0);
+                }
             }
             Msg::Highlight(atoms) => {
                 if let Some(coords) = self.structure.as_ref().and_then(|s| s.coords(0)) {

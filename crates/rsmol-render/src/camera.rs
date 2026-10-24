@@ -87,6 +87,13 @@ impl Camera {
         self.target + self.rotation * Vec3::Z * self.distance
     }
 
+    /// View-space distances over which depth fog fades in: from just in front of the scene's
+    /// center to its far side.
+    pub fn depth_range(&self) -> (f32, f32) {
+        let to_center = self.eye().distance(self.scene_center);
+        (to_center - self.scene_radius * 0.2, to_center + self.scene_radius)
+    }
+
     pub fn view(&self) -> Mat4 {
         look_at_mat4(self.eye(), self.target, self.rotation * Vec3::Y)
     }

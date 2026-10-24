@@ -1,17 +1,18 @@
 //! Standalone prototype viewer.
 //!
-//!   rsmol-viewer <structure.{pdb,cif}> [--repr spheres|sticks|cartoon|ligands]
-//!   rsmol-viewer <structure> --screenshot out.png [WxH]    render offscreen and exit
-//!   … --select "<selection>"                               highlight and zoom to atoms
+//!   rsmol-viewer <structure.{pdb,cif}> [--cmd "<commands>"]...
+//!   rsmol-viewer <structure> --screenshot out.png [WxH] [--cmd …]   render offscreen and exit
 //!
-//! Controls: left-drag rotates, right-drag (or shift+left-drag) pans, scroll zooms,
-//! R resets the view, 1–4 switch between spheres / sticks / cartoon / cartoon + ligands.
+//! `--cmd` runs a command line (e.g. "show sticks, organic; color coral, chain A; zoom organic")
+//! and may be repeated. Controls: left-drag rotates, right-drag (or shift+left-drag) pans, scroll
+//! zooms, R resets the view, 1–4 apply the presets (cartoon + ligands, cartoon, sticks, spheres).
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use rsmol_core::Structure;
-use rsmol_render::{Camera, Renderer, Representation};
+use rsmol_core::session::{Effect, PRESETS, Session};
+use rsmol_render::{Camera, Renderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -22,7 +23,7 @@ use winit::window::{Window, WindowId};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(path) = args.first() else {
-        eprintln!("usage: rsmol-viewer <structure.pdb|cif> [--screenshot out.png [WxH]]");
+        eprintln!("usage: rsmol-viewer <structure.pdb|cif> [--cmd \"<commands>\"]... [--screenshot out.png [WxH]]");
         std::process::exit(2);
     };
     let t = Instant::now();
@@ -39,30 +40,24 @@ fn main() {
         t.elapsed()
     );
 
-    let representation = match args.iter().position(|a| a == "--repr").and_then(|i| args.get(i + 1)).map(String::as_str) {
-        None | Some("ligands") => Representation::CartoonAndLigands,
-        Some("cartoon") => Representation::Cartoon,
-        Some("spheres") => Representation::Spheres,
-        Some("sticks") => Representation::Sticks,
-        Some(other) => {
-            eprintln!("unknown representation {other:?}; expected spheres, sticks, cartoon or ligands");
-            std::process::exit(2);
-        }
-    };
-
-    let selection: Option<Vec<usize>> = args.iter().position(|a| a == "--select").map(|i| {
-        let text = args.get(i + 1).expect("--select needs a selection");
-        match rsmol_core::select::select(&structure, text) {
-            Ok(set) => {
-                println!("selection {text:?}: {} atoms", set.count());
-                set.iter().collect()
-            }
-            Err(e) => {
-                eprintln!("{}", e.render(text));
-                std::process::exit(2);
+    let mut session = Session::default();
+    session.load(Arc::new(structure));
+    let mut view = ViewState::default();
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--cmd" {
+            let text = args.get(i + 1).expect("--cmd needs a command line");
+            match session.run(text, false) {
+                Ok(outcome) => {
+                    println!("> {text}\n  {}", outcome.message);
+                    view.apply(outcome.effects);
+                }
+                Err(e) => {
+                    eprintln!("{}", e.render(text));
+                    std::process::exit(2);
+                }
             }
         }
-    });
+    }
 
     if let Some(i) = args.iter().position(|a| a == "--screenshot") {
         let out = args.get(i + 1).expect("--screenshot needs an output path");
@@ -71,19 +66,57 @@ fn main() {
             .and_then(|s| s.split_once('x'))
             .map(|(w, h)| (w.parse().unwrap(), h.parse().unwrap()))
             .unwrap_or((1600, 1000));
-        pollster::block_on(screenshot(&structure, representation, selection.as_deref(), out, w, h));
+        pollster::block_on(screenshot(&session, &view, out, w, h));
         return;
     }
 
     let event_loop = EventLoop::new().unwrap();
-    let mut app = App { structure, representation, gfx: None };
+    let mut app = App { session, view, gfx: None };
     event_loop.run_app(&mut app).unwrap();
 }
 
-fn fitted_camera(structure: &Structure, width: u32, height: u32) -> Camera {
+/// Highlight and focus requested by the commands run so far.
+#[derive(Default)]
+struct ViewState {
+    highlight: Vec<usize>,
+    focus: Option<Vec<usize>>,
+}
+
+impl ViewState {
+    fn apply(&mut self, effects: Vec<Effect>) {
+        for effect in effects {
+            match effect {
+                Effect::Highlight(atoms) => self.highlight = atoms,
+                Effect::Focus(atoms) => self.focus = atoms,
+                Effect::Display => {}
+            }
+        }
+    }
+}
+
+fn structure(session: &Session) -> &Structure {
+    session.structure.as_deref().expect("a structure is loaded")
+}
+
+fn fitted_camera(session: &Session, view: &ViewState, width: u32, height: u32) -> Camera {
+    let s = structure(session);
+    let aspect = width as f32 / height.max(1) as f32;
+    let coords = s.coords(0).unwrap_or_default();
     let mut camera = Camera::default();
-    camera.fit(structure.coords(0).unwrap_or_default(), width as f32 / height.max(1) as f32);
+    camera.fit(coords, aspect);
+    // A slight tilt reads better than the raw file orientation.
+    camera.orbit(-120.0, -60.0);
+    if let Some(atoms) = &view.focus {
+        let points: Vec<_> = atoms.iter().map(|&i| coords[i]).collect();
+        camera.focus(&points, aspect);
+    }
     camera
+}
+
+fn sync_renderer(renderer: &mut Renderer, device: &wgpu::Device, session: &Session, view: &ViewState) {
+    let s = structure(session);
+    renderer.set_scene(device, s, session.display.as_ref().unwrap(), 0);
+    renderer.set_highlight(device, s.coords(0).unwrap_or_default(), view.highlight.iter().copied());
 }
 
 fn adapter_options<'a>(surface: Option<&'a wgpu::Surface<'a>>) -> wgpu::RequestAdapterOptions<'a, 'a> {
@@ -96,8 +129,8 @@ fn adapter_options<'a>(surface: Option<&'a wgpu::Surface<'a>>) -> wgpu::RequestA
 }
 
 struct App {
-    structure: Structure,
-    representation: Representation,
+    session: Session,
+    view: ViewState,
     gfx: Option<Gfx>,
 }
 
@@ -111,8 +144,6 @@ struct Gfx {
     camera: Camera,
     input: Input,
     fps: FpsCounter,
-    name: String,
-    atoms: usize,
 }
 
 #[derive(Default)]
@@ -129,7 +160,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title(format!("rsmol — {}", self.structure.name))
+            .with_title(format!("rsmol — {}", structure(&self.session).name))
             .with_inner_size(LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
@@ -149,9 +180,8 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
 
         let mut renderer = Renderer::new(&device, config.format, config.width, config.height);
-        renderer.set_structure(&device, &self.structure, 0);
-        renderer.representation = self.representation;
-        let camera = fitted_camera(&self.structure, config.width, config.height);
+        sync_renderer(&mut renderer, &device, &self.session, &self.view);
+        let camera = fitted_camera(&self.session, &self.view, config.width, config.height);
         self.gfx = Some(Gfx {
             window,
             surface,
@@ -162,8 +192,6 @@ impl ApplicationHandler for App {
             camera,
             input: Input::default(),
             fps: FpsCounter::new(),
-            name: self.structure.name.clone(),
-            atoms: self.structure.atom_count(),
         });
     }
 
@@ -217,23 +245,25 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let Key::Character(key) = &event.logical_key else { return };
                 match key.as_str() {
-                    "r" => g.camera = fitted_camera(&self.structure, g.config.width, g.config.height),
-                    "1" => g.renderer.representation = Representation::Spheres,
-                    "2" => g.renderer.representation = Representation::Sticks,
-                    "3" => g.renderer.representation = Representation::Cartoon,
-                    "4" => g.renderer.representation = Representation::CartoonAndLigands,
+                    "r" => g.camera = fitted_camera(&self.session, &self.view, g.config.width, g.config.height),
+                    k @ ("1" | "2" | "3" | "4") => {
+                        let (name, commands) = PRESETS[k.parse::<usize>().unwrap() - 1];
+                        self.session.run(commands, false).expect("presets are valid");
+                        sync_renderer(&mut g.renderer, &g.device, &self.session, &self.view);
+                        println!("preset: {name}");
+                    }
                     _ => return,
                 }
                 g.window.request_redraw();
             }
-            WindowEvent::RedrawRequested => g.draw(),
+            WindowEvent::RedrawRequested => g.draw(structure(&self.session)),
             _ => {}
         }
     }
 }
 
 impl Gfx {
-    fn draw(&mut self) {
+    fn draw(&mut self, structure: &Structure) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -251,7 +281,8 @@ impl Gfx {
         self.queue.present(frame);
 
         if let Some(fps) = self.fps.tick() {
-            self.window.set_title(&format!("rsmol — {} — {} atoms — {fps:.0} fps", self.name, self.atoms));
+            let title = format!("rsmol — {} — {} atoms — {fps:.0} fps", structure.name, structure.atom_count());
+            self.window.set_title(&title);
         }
     }
 }
@@ -280,14 +311,7 @@ impl FpsCounter {
 }
 
 /// Renders one frame offscreen and writes it as a PNG.
-async fn screenshot(
-    structure: &Structure,
-    representation: Representation,
-    selection: Option<&[usize]>,
-    out: &str,
-    width: u32,
-    height: u32,
-) {
+async fn screenshot(session: &Session, view: &ViewState, out: &str, width: u32, height: u32) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = instance.request_adapter(&adapter_options(None)).await.unwrap();
     let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
@@ -305,17 +329,9 @@ async fn screenshot(
 
     let mut renderer = Renderer::new(&device, format, width, height);
     let t = Instant::now();
-    renderer.set_structure(&device, structure, 0);
-    println!("built representations in {:.1?}", t.elapsed());
-    renderer.representation = representation;
-    let mut camera = fitted_camera(structure, width, height);
-    // A slight tilt reads better than the raw file orientation.
-    camera.orbit(-120.0, -60.0);
-    if let (Some(atoms), Some(coords)) = (selection, structure.coords(0)) {
-        renderer.set_highlight(&device, coords, atoms.iter().copied());
-        let points: Vec<_> = atoms.iter().map(|&i| coords[i]).collect();
-        camera.focus(&points, width as f32 / height as f32);
-    }
+    sync_renderer(&mut renderer, &device, session, view);
+    println!("built geometry in {:.1?}", t.elapsed());
+    let mut camera = fitted_camera(session, view, width, height);
 
     let row_bytes = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -348,12 +364,12 @@ async fn screenshot(
 
     // Steady state: render and wait for the GPU each time, so this is the full frame latency.
     const FRAMES: u32 = 100;
-    let view = target.create_view(&Default::default());
+    let target_view = target.create_view(&Default::default());
     let t = Instant::now();
     for i in 0..FRAMES {
         camera.orbit(if i % 2 == 0 { 1.0 } else { -1.0 }, 0.0);
         let mut encoder = device.create_command_encoder(&Default::default());
-        renderer.render(&queue, &mut encoder, &view, &camera);
+        renderer.render(&queue, &mut encoder, &target_view, &camera);
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }

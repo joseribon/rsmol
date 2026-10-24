@@ -48,17 +48,17 @@ impl Profile {
     }
 }
 
-/// Builds one mesh for all `traces`; `color` gives the color of each trace.
-pub fn build(s: &Structure, state: usize, traces: &[Trace], color: impl Fn(&Trace) -> [u8; 4]) -> Mesh {
+/// Builds one mesh for all `traces`; `color` gives each residue's color.
+pub fn build(s: &Structure, state: usize, traces: &[Trace], color: impl Fn(u32) -> [u8; 4]) -> Mesh {
     let mut mesh = Mesh::default();
     let Some(coords) = s.coords(state) else { return mesh };
     for trace in traces {
-        sweep(&mut mesh, coords, s, trace, color(trace));
+        sweep(&mut mesh, coords, s, trace, &color);
     }
     mesh
 }
 
-fn sweep(mesh: &mut Mesh, coords: &[[f32; 3]], s: &Structure, trace: &Trace, color: [u8; 4]) {
+fn sweep(mesh: &mut Mesh, coords: &[[f32; 3]], s: &Structure, trace: &Trace, color: &impl Fn(u32) -> [u8; 4]) {
     let n = trace.len();
     let at = |atom: u32| Vec3::from(coords[atom as usize]);
     let ss: Vec<Ss> = match trace.kind {
@@ -145,6 +145,8 @@ fn sweep(mesh: &mut Mesh, coords: &[[f32; 3]], s: &Structure, trace: &Trace, col
             base(i).lerp(base(i + 1), smoothstep(t))
         };
 
+        // Each half-segment takes the color of the nearer residue.
+        let color = color(trace.residues[if t < 0.5 { i } else { i + 1 }]);
         for r in 0..RING {
             let theta = TAU * r as f32 / RING as f32;
             let (sin, cos) = theta.sin_cos();
@@ -160,14 +162,14 @@ fn sweep(mesh: &mut Mesh, coords: &[[f32; 3]], s: &Structure, trace: &Trace, col
                 mesh.indices.extend_from_slice(&[a + r, b + r, a + r1, a + r1, b + r, b + r1]);
             }
         }
-        first_center.get_or_insert((pos, -tangent));
-        last_center = Some((pos, tangent));
+        first_center.get_or_insert((pos, -tangent, color));
+        last_center = Some((pos, tangent, color));
         rings += 1;
     }
 
     // Close both ends so the tube does not look hollow.
     let last_ring = first_ring + (rings - 1) * RING as u32;
-    for ((center, normal), ring) in [(first_center.unwrap(), first_ring), (last_center.unwrap(), last_ring)] {
+    for ((center, normal, color), ring) in [(first_center.unwrap(), first_ring), (last_center.unwrap(), last_ring)] {
         let c = mesh.vertices.len() as u32;
         mesh.vertices.push(MeshVertex { position: center.into(), normal: normal.into(), color });
         for r in 0..RING as u32 {

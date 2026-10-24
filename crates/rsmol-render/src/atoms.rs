@@ -1,6 +1,7 @@
-//! Per-atom geometry: van der Waals spheres and licorice sticks.
+//! Per-atom geometry: van der Waals spheres and licorice sticks, built from the display state.
 
 use bytemuck::{Pod, Zeroable};
+use rsmol_core::display::{Display, Reps};
 use rsmol_core::{BondKind, Structure, Vec3};
 
 use crate::style;
@@ -30,23 +31,32 @@ pub const STICK_RADIUS: f32 = 0.2;
 /// Unbonded atoms (ions) in stick mode are drawn at this fraction of their vdW radius.
 const ION_SCALE: f32 = 0.5;
 
-/// Van der Waals spheres for the atoms in `include`.
-pub fn spheres(s: &Structure, coords: &[Vec3], include: &[bool], color: impl Fn(usize) -> [u8; 4]) -> Vec<SphereInstance> {
+/// Van der Waals spheres for atoms shown as spheres.
+pub fn spheres(s: &Structure, coords: &[Vec3], display: &Display) -> Vec<SphereInstance> {
     (0..coords.len())
-        .filter(|&i| include[i])
-        .map(|i| SphereInstance { center: coords[i], radius: style::vdw_radius(s.atoms.element[i]), color: color(i) })
+        .filter(|&i| display.reps[i].contains(Reps::SPHERES))
+        .map(|i| SphereInstance {
+            center: coords[i],
+            radius: style::vdw_radius(s.atoms.element[i]),
+            color: display.colors[i],
+        })
         .collect()
 }
 
-/// Sticks for covalent bonds between atoms in `include`, a joint sphere on every bonded atom,
-/// and a small sphere for included atoms without bonds (ions).
-pub fn sticks(
-    s: &Structure,
-    coords: &[Vec3],
-    include: &[bool],
-    color: impl Fn(usize) -> [u8; 4],
-) -> (Vec<SphereInstance>, Vec<StickInstance>) {
+/// Sticks for covalent bonds between atoms shown as sticks, a joint sphere on every such atom,
+/// and a small sphere for stick atoms without bonds (ions).
+///
+/// `anchors` are atoms that sticks may attach to without being sticks themselves: the cartoon's
+/// backbone guide atoms, so side chains shown as sticks connect to the ribbon.
+pub fn sticks(s: &Structure, coords: &[Vec3], display: &Display, anchors: &[bool]) -> (Vec<SphereInstance>, Vec<StickInstance>) {
+    let is_stick = |i: usize| display.reps[i].contains(Reps::STICKS);
+    // Only atoms without any covalent bond (ions) get the larger sphere; a bonded atom whose
+    // partners are hidden (a glycine CA shown alone) still gets a joint-sized one.
     let mut bonded = vec![false; coords.len()];
+    for bond in s.bonds.iter().filter(|b| b.kind != BondKind::MetalCoordination) {
+        bonded[bond.atoms[0] as usize] = true;
+        bonded[bond.atoms[1] as usize] = true;
+    }
     let mut sticks = Vec::new();
     for bond in &s.bonds {
         // Metal coordination is not a covalent bond; it will get a dashed style later.
@@ -54,24 +64,23 @@ pub fn sticks(
             continue;
         }
         let [a, b] = bond.atoms.map(|x| x as usize);
-        if !(include[a] && include[b]) {
+        let drawn = (is_stick(a) && (is_stick(b) || anchors[b])) || (is_stick(b) && anchors[a]);
+        if !drawn {
             continue;
         }
-        bonded[a] = true;
-        bonded[b] = true;
         sticks.push(StickInstance {
             a: coords[a],
             b: coords[b],
             radius: STICK_RADIUS,
-            color_a: color(a),
-            color_b: color(b),
+            color_a: display.colors[a],
+            color_b: display.colors[b],
         });
     }
     let spheres = (0..coords.len())
-        .filter(|&i| include[i])
+        .filter(|&i| is_stick(i))
         .map(|i| {
             let radius = if bonded[i] { STICK_RADIUS } else { style::vdw_radius(s.atoms.element[i]) * ION_SCALE };
-            SphereInstance { center: coords[i], radius, color: color(i) }
+            SphereInstance { center: coords[i], radius, color: display.colors[i] }
         })
         .collect();
     (spheres, sticks)

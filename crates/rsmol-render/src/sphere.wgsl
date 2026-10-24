@@ -46,8 +46,12 @@ struct FsOut {
     @builtin(frag_depth) depth: f32,
 }
 
-@fragment
-fn fs_main(in: VsOut) -> FsOut {
+struct Hit {
+    pos: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+fn intersect(in: VsOut) -> Hit {
     let dir = normalize(in.view_pos);
     let b = dot(dir, in.center);
     let disc = b * b - (dot(in.center, in.center) - in.radius * in.radius);
@@ -55,11 +59,22 @@ fn fs_main(in: VsOut) -> FsOut {
         discard;
     }
     let hit = dir * (b - sqrt(disc));
-    let n = (hit - in.center) / in.radius;
+    return Hit(hit, (hit - in.center) / in.radius);
+}
 
-    let clip = u.proj * vec4(hit, 1.0);
+@fragment
+fn fs_main(in: VsOut) -> FsOut {
+    let hit = intersect(in);
+    let clip = u.proj * vec4(hit.pos, 1.0);
     var out: FsOut;
-    out.color = vec4(shade(in.color, n, -dir), ALPHA);
+    out.color = vec4(shade(in.color, hit.normal, -normalize(hit.pos)), 1.0);
     out.depth = clip.z / clip.w;
     return out;
+}
+
+// Selection markers: blended over the final image, so no depth is written.
+@fragment
+fn fs_marker(in: VsOut) -> @location(0) vec4<f32> {
+    let hit = intersect(in);
+    return vec4(shade(in.color, hit.normal, -normalize(hit.pos)), ALPHA);
 }

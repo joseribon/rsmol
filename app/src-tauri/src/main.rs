@@ -1,7 +1,6 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod commands;
 #[cfg(target_os = "macos")]
 mod macos;
 mod viewport;
@@ -11,10 +10,10 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use commands::Session;
+use rsmol_core::session::{Effect, PRESETS, Session};
 use serde::Serialize;
 use tauri::{Manager, State, WindowEvent};
-use viewport::{CameraAction, Msg, RepresentationArg};
+use viewport::{CameraAction, Msg};
 
 struct Viewport(Sender<Msg>);
 
@@ -58,8 +57,12 @@ async fn load_structure(
         parse_ms: start.elapsed().as_secs_f64() * 1e3,
     };
     let structure = Arc::new(structure);
-    *session.lock().unwrap() = Session { structure: Some(structure.clone()), ..Default::default() };
-    viewport.send(Msg::Load(structure))?;
+    let display = {
+        let mut session = session.lock().unwrap();
+        session.load(structure.clone());
+        session.display.clone().expect("load sets the display")
+    };
+    viewport.send(Msg::Load(structure, display))?;
     Ok(info)
 }
 
@@ -68,9 +71,16 @@ fn camera(action: CameraAction, viewport: State<'_, Viewport>) -> Result<(), Str
     viewport.send(Msg::Camera(action))
 }
 
+#[derive(Serialize)]
+struct Preset {
+    name: &'static str,
+    commands: &'static str,
+}
+
+/// One-click looks, with the command lines they run.
 #[tauri::command]
-fn set_representation(representation: RepresentationArg, viewport: State<'_, Viewport>) -> Result<(), String> {
-    viewport.send(Msg::Representation(representation.into()))
+fn presets() -> Vec<Preset> {
+    PRESETS.iter().map(|&(name, commands)| Preset { name, commands }).collect()
 }
 
 #[derive(Serialize)]
@@ -82,10 +92,18 @@ struct SelectionErrorInfo {
 }
 
 #[derive(Serialize)]
+struct SelectionSummary {
+    atoms: usize,
+    residues: usize,
+}
+
+#[derive(Serialize)]
 struct CommandResult {
     message: String,
     canonical: Option<String>,
     atoms: Option<usize>,
+    /// The "sele" selection after the command, for the selection card.
+    selection: Option<SelectionSummary>,
 }
 
 /// Runs a command-bar line. With `dry_run`, only reports what it would do, for live feedback.
@@ -96,15 +114,25 @@ fn run_command(
     viewport: State<'_, Viewport>,
     session: State<'_, Mutex<Session>>,
 ) -> Result<CommandResult, SelectionErrorInfo> {
-    let outcome = session.lock().unwrap().run(&text, dry_run).map_err(|e| SelectionErrorInfo {
+    let mut session = session.lock().unwrap();
+    let outcome = session.run(&text, dry_run).map_err(|e| SelectionErrorInfo {
         start: text[..e.span.start].chars().count(),
         end: text[..e.span.end].chars().count(),
         message: e.message,
     })?;
-    for msg in outcome.effects {
+    for effect in outcome.effects {
+        let msg = match effect {
+            Effect::Highlight(atoms) => Msg::Highlight(atoms),
+            Effect::Focus(atoms) => Msg::Focus(atoms),
+            Effect::Display => Msg::Display(session.display.clone().expect("display exists with a structure")),
+        };
         let _ = viewport.send(msg);
     }
-    Ok(CommandResult { message: outcome.message, canonical: outcome.canonical, atoms: outcome.atoms })
+    let selection = session.named.get("sele").zip(session.structure.as_ref()).map(|(set, s)| SelectionSummary {
+        atoms: set.count(),
+        residues: set.iter().map(|i| s.atoms.residue[i]).collect::<BTreeSet<_>>().len(),
+    });
+    Ok(CommandResult { message: outcome.message, canonical: outcome.canonical, atoms: outcome.atoms, selection })
 }
 
 /// A structure path passed on the command line, if any.
@@ -128,7 +156,7 @@ fn main() {
             app.manage(Mutex::new(Session::default()));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![load_structure, camera, set_representation, run_command, startup_file])
+        .invoke_handler(tauri::generate_handler![load_structure, camera, presets, run_command, startup_file])
         .run(tauri::generate_context!())
         .expect("error while running rsmol");
 }

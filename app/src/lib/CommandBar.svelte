@@ -1,45 +1,32 @@
 <script lang="ts">
   // PyMOL-style command line. While typing, each line is dry-run for live feedback (atom count,
   // canonical selection, or an error with carets under the offending text); Enter runs it.
-  import { runCommand, type CommandResult, type SelectionError } from "./api";
-
-  type Result = { ok: true; value: CommandResult } | { ok: false; error: SelectionError };
+  import type { CommandResult, SelectionError } from "./api";
+  import { consoleState, execute, type Outcome } from "./console.svelte";
 
   let text = $state("");
-  let result: Result | null = $state(null);
-  let history: { input: string; output: string; ok: boolean }[] = $state([]);
+  let result: Outcome | null = $state(null);
   let historyIndex = -1;
   let timer: ReturnType<typeof setTimeout> | undefined;
-
-  async function run(input: string, dryRun: boolean): Promise<Result | null> {
-    if (!input.trim()) return null;
-    try {
-      return { ok: true, value: await runCommand(input, dryRun) };
-    } catch (error) {
-      return { ok: false, error: error as SelectionError };
-    }
-  }
 
   function oninput() {
     clearTimeout(timer);
     const input = text;
     timer = setTimeout(async () => {
-      const r = await run(input, true);
+      const r = await execute(input, { dryRun: true });
       if (input === text) result = r;
     }, 60);
   }
 
   async function onkeydown(e: KeyboardEvent) {
+    const history = consoleState.history;
     if (e.key === "Enter" && text.trim()) {
-      const input = text;
-      const r = await run(input, false);
-      if (!r) return;
-      if (r.ok) {
-        history = [...history.slice(-4), { input, output: r.value.message, ok: true }];
+      // Errors stay inline (the text is kept so it can be fixed in place), not in the history.
+      const r = await execute(text, { logErrors: false });
+      if (r?.ok) {
         text = "";
         result = null;
       } else {
-        // Keep the text so the error can be fixed in place.
         result = r;
       }
       historyIndex = -1;
@@ -63,9 +50,9 @@
 </script>
 
 <div class="command panel">
-  {#if history.length}
+  {#if consoleState.history.length}
     <ol class="history mono">
-      {#each history as entry}
+      {#each consoleState.history as entry}
         <li><span class="echo">› {entry.input}</span><span class:error={!entry.ok}>{entry.output}</span></li>
       {/each}
     </ol>
@@ -80,7 +67,7 @@
         {onkeydown}
         spellcheck="false"
         autocomplete="off"
-        placeholder="byres (organic around 5) and polymer   ·   zoom sele   ·   deselect"
+        placeholder="byres (organic around 5) and polymer   ·   show sticks, sele   ·   color coral, chain A"
       />
       {#if result && !result.ok}
         <div class="carets mono" aria-hidden="true">{carets(result.error)}</div>

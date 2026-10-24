@@ -5,9 +5,12 @@
 
 pub mod backbone;
 pub mod bonds;
+pub mod color;
+pub mod display;
 mod element;
 pub mod io;
 pub mod select;
+pub mod session;
 pub mod spatial;
 mod structure;
 

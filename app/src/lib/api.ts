@@ -23,23 +23,32 @@ export type CameraAction =
   | { kind: "zoom"; factor: number }
   | { kind: "reset" };
 
-export type Representation = "spheres" | "sticks" | "cartoon" | "ligands";
-
 export interface FrameStats {
   frame_ms: number;
   gpu: string;
 }
 
-export const loadStructure = (path: string) => invoke<StructureInfo>("load_structure", { path });
-export const camera = (action: CameraAction) => invoke<void>("camera", { action });
-export const setRepresentation = (representation: Representation) =>
-  invoke<void>("set_representation", { representation });
+export interface SelectionSummary {
+  atoms: number;
+  residues: number;
+}
+
 export interface CommandResult {
   message: string;
   canonical: string | null;
   atoms: number | null;
+  /** The "sele" selection after the command. */
+  selection: SelectionSummary | null;
 }
 
+export interface Preset {
+  name: string;
+  commands: string;
+}
+
+export const loadStructure = (path: string) => invoke<StructureInfo>("load_structure", { path });
+export const camera = (action: CameraAction) => invoke<void>("camera", { action });
+export const presets = () => invoke<Preset[]>("presets");
 /** Runs a command-bar line; `dryRun` reports what it would do without changing anything. */
 export const runCommand = (text: string, dryRun: boolean) =>
   invoke<CommandResult>("run_command", { text, dryRun });
