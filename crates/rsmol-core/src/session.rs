@@ -11,7 +11,9 @@
 //!   distance [<name>,] <a>, <b>      measure between two single-atom selections
 //!   angle [<name>,] <a>, <b>, <c>    angle at <b>
 //!   dihedral [<name>,] <a>, …, <d>   torsion about <b>–<c>
-//!   delete <name>|all                remove a measurement or named selection
+//!   align <mobile>, <target>         superpose mobile's object onto target (sequence + fit)
+//!   enable / disable <object>|all    show or hide whole objects
+//!   delete <name>|all                remove an object, measurement or named selection
 //!   undo / redo                      step back or forward through changes
 //!   <selection>                      same as `select <selection>`
 //!
@@ -24,8 +26,10 @@ use std::sync::Arc;
 
 use crate::color::{self, Rgba};
 use crate::display::{self, Display, Reps};
+use crate::backbone;
 use crate::measure::{Measurement, MeasurementKind};
 use crate::select::{AtomSet, Evaluator, SelectionError, parse};
+use crate::superpose::{self, Transform};
 use crate::Structure;
 
 const DEFAULT_SELECTION: &str = "sele";
@@ -46,10 +50,24 @@ pub struct Source {
     pub data: Arc<Vec<u8>>,
 }
 
+/// One loaded structure. Its atoms occupy a contiguous range of the session's merged scene.
+#[derive(Clone, Debug)]
+pub struct Object {
+    pub name: String,
+    /// Coordinates already include `transform`.
+    pub structure: Arc<Structure>,
+    pub source: Option<Source>,
+    /// Applied to the file's coordinates (e.g. by `align`); saved so sessions can reproduce it.
+    pub transform: Transform,
+    pub enabled: bool,
+}
+
+/// A session holds any number of objects. `structure` is their merged scene: every selection,
+/// display flag, measurement and atom index refers to it, and objects are named ranges of it.
 #[derive(Default)]
 pub struct Session {
+    pub objects: Vec<Object>,
     pub structure: Option<Arc<Structure>>,
-    pub source: Option<Source>,
     pub display: Option<Display>,
     pub named: HashMap<String, AtomSet>,
     pub measurements: Vec<Measurement>,
@@ -58,11 +76,22 @@ pub struct Session {
 }
 
 /// Everything a command can change; the camera is deliberately not part of undo.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct Snapshot {
+    objects: Vec<Object>,
     display: Option<Display>,
     named: HashMap<String, AtomSet>,
     measurements: Vec<Measurement>,
+}
+
+impl PartialEq for Snapshot {
+    fn eq(&self, other: &Snapshot) -> bool {
+        let same_objects = self.objects.len() == other.objects.len()
+            && self.objects.iter().zip(&other.objects).all(|(a, b)| {
+                a.name == b.name && Arc::ptr_eq(&a.structure, &b.structure) && a.enabled == b.enabled
+            });
+        same_objects && self.display == other.display && self.named == other.named && self.measurements == other.measurements
+    }
 }
 
 /// Undo steps kept. A display snapshot is about 5 bytes per atom (1.2 MB for a ribosome).
@@ -79,6 +108,9 @@ pub enum Effect {
     Display,
     /// `Session::measurements` changed.
     Measurements,
+    /// `Session::structure` was replaced (objects added, removed or moved); `refit` asks the
+    /// front end to frame everything.
+    Scene { refit: bool },
 }
 
 /// What a command did (or, for a dry run, would do).
@@ -111,6 +143,8 @@ enum Command<'a> {
     Color { color: Color, sel: Option<Arg<'a>> },
     Measure { kind: MeasurementKind, name: Option<Arg<'a>>, sels: Vec<Arg<'a>> },
     Delete { name: Arg<'a> },
+    Align { mobile: Arg<'a>, target: Arg<'a> },
+    Enable { name: Arg<'a>, enabled: bool },
 }
 
 /// A selection argument and its byte offset in the full command line.
@@ -253,9 +287,19 @@ fn parse_command(text: &str, offset: usize) -> Result<Command<'_>, SelectionErro
         }
         "delete" => {
             if args.text.is_empty() {
-                return Err(error(end..end, "delete needs a measurement or selection name, or all"));
+                return Err(error(end..end, "delete needs an object, measurement or selection name, or all"));
             }
             Command::Delete { name: args }
+        }
+        "align" | "super" => match split_comma(args) {
+            (mobile, Some(target)) if !mobile.text.is_empty() => Command::Align { mobile, target },
+            _ => return Err(error(if args.text.is_empty() { end..end } else { span(args) }, "align takes <mobile>, <target>")),
+        },
+        kw @ ("enable" | "disable") => {
+            if args.text.is_empty() {
+                return Err(error(end..end, format!("{kw} needs an object name or all")));
+            }
+            Command::Enable { name: args, enabled: kw == "enable" }
         }
         _ => Command::Select { name: DEFAULT_SELECTION, sel: line },
     })
@@ -271,22 +315,161 @@ fn split_commands(text: &str) -> impl Iterator<Item = (&str, usize)> {
     })
 }
 
+fn transformed(s: &Structure, t: &Transform) -> Structure {
+    let mut out = s.clone();
+    for state in &mut out.states {
+        for p in state.iter_mut() {
+            *p = t.apply(*p);
+        }
+    }
+    out
+}
+
 impl Session {
-    /// Loads a structure read from `source`, so the session can later be saved.
+    /// Replaces everything with one structure read from `source`, so it can later be saved.
     pub fn load_with_source(&mut self, structure: Arc<Structure>, source: Source) {
-        self.load(structure);
-        self.source = Some(source);
+        self.load_object(structure, Some(source));
     }
 
-    /// Loads a structure with the default display and no named selections.
+    /// Replaces everything with one structure: default display, no selections, no history.
     pub fn load(&mut self, structure: Arc<Structure>) {
-        self.source = None;
+        self.load_object(structure, None);
+    }
+
+    fn load_object(&mut self, structure: Arc<Structure>, source: Option<Source>) {
         self.display = Some(Display::default_for(&structure));
-        self.structure = Some(structure);
+        self.objects = vec![Object {
+            name: structure.name.clone(),
+            structure,
+            source,
+            transform: Transform::IDENTITY,
+            enabled: true,
+        }];
+        self.rebuild_scene();
         self.named.clear();
         self.measurements.clear();
         self.undo.clear();
         self.redo.clear();
+    }
+
+    /// Adds a structure as a new object (or loads it, if the session is empty) and returns its
+    /// name, made unique if needed, plus the effects to apply. Undoable.
+    pub fn add_object(&mut self, structure: Arc<Structure>, source: Option<Source>) -> (String, Vec<Effect>) {
+        if self.objects.is_empty() {
+            let name = structure.name.clone();
+            self.load_object(structure, source);
+            return (name, vec![Effect::Scene { refit: true }, Effect::Display, Effect::Measurements]);
+        }
+        let before = self.snapshot();
+        let base = structure.name.clone();
+        let name = std::iter::once(base.clone())
+            .chain((2..).map(|k| format!("{base}_{k}")))
+            .find(|n| self.objects.iter().all(|o| !o.name.eq_ignore_ascii_case(n)))
+            .unwrap();
+        let palette_offset: usize = self.objects.iter().map(|o| display::chain_count(&o.structure)).sum();
+        let added = Display::default_with_palette_offset(&structure, palette_offset);
+        let display = self.display.as_mut().expect("display exists with objects");
+        display.reps.extend(added.reps);
+        display.colors.extend(added.colors);
+        self.objects.push(Object { name: name.clone(), structure, source, transform: Transform::IDENTITY, enabled: true });
+        self.rebuild_scene();
+        let n = self.atom_count();
+        for set in self.named.values_mut() {
+            *set = set.resized(n);
+        }
+        self.record(before);
+        (name, vec![Effect::Scene { refit: true }, Effect::Display, Effect::Measurements])
+    }
+
+    fn atom_count(&self) -> usize {
+        self.structure.as_ref().map_or(0, |s| s.atom_count())
+    }
+
+    /// Object names and their atom ranges in the merged scene.
+    pub fn object_ranges(&self) -> Vec<(String, Range<usize>)> {
+        let mut start = 0;
+        self.objects
+            .iter()
+            .map(|o| {
+                let range = start..start + o.structure.atom_count();
+                start = range.end;
+                (o.name.clone(), range)
+            })
+            .collect()
+    }
+
+    /// The display as drawn: like `display`, with disabled objects hidden.
+    pub fn render_display(&self) -> Option<Display> {
+        let mut display = self.display.clone()?;
+        for ((_, range), object) in self.object_ranges().into_iter().zip(&self.objects) {
+            if !object.enabled {
+                for r in &mut display.reps[range] {
+                    *r = Reps::NONE;
+                }
+            }
+        }
+        Some(display)
+    }
+
+    /// Rebuilds the merged scene from the objects. One object is used as is, without a copy.
+    pub(crate) fn rebuild_scene(&mut self) {
+        self.structure = match self.objects.as_slice() {
+            [] => None,
+            [only] => Some(only.structure.clone()),
+            many => {
+                let parts: Vec<&Structure> = many.iter().map(|o| o.structure.as_ref()).collect();
+                Some(Arc::new(Structure::concat("scene", &parts)))
+            }
+        };
+        if self.structure.is_none() {
+            self.display = None;
+        }
+    }
+
+    /// Recomputes measurement values after coordinates moved.
+    fn remeasure(&mut self) {
+        let Some(s) = self.structure.clone() else { return };
+        let coords = s.coords(0).unwrap_or_default();
+        for m in &mut self.measurements {
+            *m = Measurement::new(std::mem::take(&mut m.name), m.kind, std::mem::take(&mut m.atoms), coords);
+        }
+    }
+
+    /// Removes object `k`, remapping display, selections and measurements onto the new scene.
+    fn remove_object(&mut self, k: usize) {
+        let range = self.object_ranges()[k].1.clone();
+        let width = range.len();
+        let map = |i: usize| match i {
+            i if i < range.start => Some(i),
+            i if i >= range.end => Some(i - width),
+            _ => None,
+        };
+        self.objects.remove(k);
+        if let Some(display) = self.display.as_mut() {
+            display.reps.drain(range.clone());
+            display.colors.drain(range.clone());
+        }
+        self.rebuild_scene();
+        let n = self.atom_count();
+        for set in self.named.values_mut() {
+            *set = AtomSet::from_indices(n, set.iter().filter_map(map));
+        }
+        self.measurements.retain(|m| m.atoms.iter().all(|&a| map(a).is_some()));
+        for m in &mut self.measurements {
+            m.atoms = m.atoms.iter().map(|&a| map(a).unwrap()).collect();
+        }
+        self.remeasure();
+    }
+
+    /// Pushes `before` as an undo step if anything changed since.
+    fn record(&mut self, before: Snapshot) {
+        if before != self.snapshot() {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_LIMIT {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -298,15 +481,30 @@ impl Session {
     }
 
     fn snapshot(&self) -> Snapshot {
-        Snapshot { display: self.display.clone(), named: self.named.clone(), measurements: self.measurements.clone() }
+        Snapshot {
+            objects: self.objects.clone(),
+            display: self.display.clone(),
+            named: self.named.clone(),
+            measurements: self.measurements.clone(),
+        }
     }
 
     fn restore(&mut self, s: Snapshot) -> Vec<Effect> {
+        let scene_changed = s.objects.len() != self.objects.len()
+            || s.objects.iter().zip(&self.objects).any(|(a, b)| !Arc::ptr_eq(&a.structure, &b.structure));
+        self.objects = s.objects;
+        if scene_changed {
+            self.rebuild_scene();
+        }
         self.display = s.display;
         self.named = s.named;
         self.measurements = s.measurements;
         let sele = self.named.get(DEFAULT_SELECTION).map(|set| set.iter().collect()).unwrap_or_default();
-        vec![Effect::Display, Effect::Measurements, Effect::Highlight(sele)]
+        let mut effects = vec![Effect::Display, Effect::Measurements, Effect::Highlight(sele)];
+        if scene_changed {
+            effects.insert(0, Effect::Scene { refit: false });
+        }
+        effects
     }
 
     /// Steps back (`undo`) or forward through changes.
@@ -355,14 +553,8 @@ impl Session {
                 }
             }
         }
-        if let Some(before) = before
-            && before != self.snapshot()
-        {
-            self.undo.push(before);
-            if self.undo.len() > UNDO_LIMIT {
-                self.undo.remove(0);
-            }
-            self.redo.clear();
+        if let Some(before) = before {
+            self.record(before);
         }
         result?;
         let mut outcome = last.ok_or_else(|| error(0..text.len(), "nothing to run"))?;
@@ -391,13 +583,14 @@ impl Session {
             .clone()
             .ok_or_else(|| error(offset..offset + text.len(), "no structure loaded"))?;
         let n = structure.atom_count();
-        let visible = self.display.as_ref().map(Display::visible);
+        let visible = self.render_display().as_ref().map(Display::visible);
+        let objects = self.object_ranges();
         let evaluate = |sel: Option<Arg>| -> Result<(AtomSet, Option<String>), SelectionError> {
             let Some(arg) = sel else { return Ok((AtomSet::full(n), None)) };
             // `arg.offset` is absolute; parse errors are relative to the argument text.
             let local = |e: SelectionError| shift(e, arg.offset);
             let parsed = parse(arg.text).map_err(local)?;
-            let mut ev = Evaluator::new(&structure, 0).with_named(&self.named);
+            let mut ev = Evaluator::new(&structure, 0).with_named(&self.named).with_objects(objects.clone());
             if let Some(v) = &visible {
                 ev = ev.with_visible(v);
             }
@@ -485,6 +678,68 @@ impl Session {
                 };
                 (message, None, set, effects)
             }
+            Command::Align { mobile, target } => {
+                let (mobile_set, _) = evaluate(Some(mobile))?;
+                let (target_set, _) = evaluate(Some(target))?;
+                let object_of = |i: usize| objects.partition_point(|(_, r)| r.end <= i);
+                let owners = |set: &AtomSet| set.iter().map(object_of).collect::<BTreeSet<_>>();
+                let mobile_objects = owners(&mobile_set);
+                let k = match mobile_objects.iter().collect::<Vec<_>>().as_slice() {
+                    [k] => **k,
+                    [] => return Err(error(span(mobile), "mobile selection is empty")),
+                    _ => return Err(error(span(mobile), "mobile selection spans several objects; align moves one")),
+                };
+                if owners(&target_set).contains(&k) {
+                    return Err(error(span(target), "target overlaps the object being moved"));
+                }
+                // Pair residues by their guide atoms (CA / C4') inside each selection.
+                let coords = structure.coords(0).unwrap_or_default();
+                let traces = backbone::traces(&structure, 0);
+                let residues = |set: &AtomSet| -> Vec<([f32; 3], u8)> {
+                    traces
+                        .iter()
+                        .flat_map(|t| t.residues.iter().zip(&t.guide_atoms))
+                        .filter(|(_, g)| set.contains(**g as usize))
+                        .map(|(&r, &g)| (coords[g as usize], superpose::one_letter(&structure.residues[r as usize].name)))
+                        .collect()
+                };
+                let result = superpose::align(&residues(&mobile_set), &residues(&target_set)).ok_or_else(|| {
+                    error(offset..offset + text.len(), "fewer than 3 residues could be paired between the selections")
+                })?;
+                let name = self.objects[k].name.clone();
+                let message = format!(
+                    "{name}: RMSD = {:.3} Å over {} residues ({} paired, {} cycles)",
+                    result.rmsd, result.aligned, result.paired, result.cycles
+                );
+                let effects = if dry_run {
+                    Vec::new()
+                } else {
+                    let object = &mut self.objects[k];
+                    object.structure = Arc::new(transformed(&object.structure, &result.transform));
+                    object.transform = result.transform.after(&object.transform);
+                    self.rebuild_scene();
+                    self.remeasure();
+                    vec![Effect::Scene { refit: false }, Effect::Measurements]
+                };
+                (message, None, mobile_set, effects)
+            }
+            Command::Enable { name, enabled } => {
+                let all = name.text.eq_ignore_ascii_case("all");
+                let hits: Vec<usize> =
+                    (0..self.objects.len()).filter(|&k| all || self.objects[k].name.eq_ignore_ascii_case(name.text)).collect();
+                if hits.is_empty() {
+                    return Err(error(span(name), format!("no object named '{}'", name.text)));
+                }
+                if !dry_run {
+                    for &k in &hits {
+                        self.objects[k].enabled = enabled;
+                    }
+                }
+                let set = AtomSet::from_indices(n, hits.iter().flat_map(|&k| objects[k].1.clone()));
+                let verb = if enabled { "enable" } else { "disable" };
+                (format!("{verb} {}", if all { "all objects".to_owned() } else { name.text.to_owned() }), None, set,
+                    if dry_run { Vec::new() } else { vec![Effect::Display] })
+            }
             Command::Deselect | Command::Delete { .. } => unreachable!("handled above"),
         };
         Ok(Outcome { message, canonical, atoms: Some(set.count()), effects })
@@ -501,13 +756,31 @@ impl Session {
     fn delete(&mut self, name: Arg, dry_run: bool) -> Result<Outcome, SelectionError> {
         let outcome = |message: String, effects| Outcome { message, canonical: None, atoms: None, effects };
         if name.text.eq_ignore_ascii_case("all") {
-            let message = format!("delete {} measurements and {} selections", self.measurements.len(), self.named.len());
+            let message = format!(
+                "delete {} objects, {} measurements and {} selections",
+                self.objects.len(),
+                self.measurements.len(),
+                self.named.len()
+            );
             if dry_run {
                 return Ok(outcome(message, Vec::new()));
             }
+            self.objects.clear();
+            self.rebuild_scene();
             self.measurements.clear();
             self.named.clear();
-            return Ok(outcome(message, vec![Effect::Measurements, Effect::Highlight(Vec::new())]));
+            let effects = vec![Effect::Scene { refit: true }, Effect::Measurements, Effect::Highlight(Vec::new())];
+            return Ok(outcome(message, effects));
+        }
+        if let Some(k) = self.objects.iter().position(|o| o.name.eq_ignore_ascii_case(name.text)) {
+            let message = format!("delete object {}", self.objects[k].name);
+            if dry_run {
+                return Ok(outcome(message, Vec::new()));
+            }
+            self.remove_object(k);
+            let sele = self.named.get(DEFAULT_SELECTION).map(|set| set.iter().collect()).unwrap_or_default();
+            let effects = vec![Effect::Scene { refit: true }, Effect::Display, Effect::Measurements, Effect::Highlight(sele)];
+            return Ok(outcome(message, effects));
         }
         let is_measurement = self.measurements.iter().any(|m| m.name == name.text);
         if !is_measurement && !self.named.contains_key(name.text) {
@@ -728,5 +1001,92 @@ HETATM    7 ZN    ZN A 101       9.000   0.000   0.000  1.00  0.00          ZN
         assert!(out.effects.is_empty());
         assert_eq!(reps(&s), before);
         assert!(s.named.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod object_tests {
+    use super::*;
+    use crate::superpose::Transform;
+
+    fn traces() -> Structure {
+        crate::io::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/traces.pdb")).unwrap()
+    }
+
+    /// traces.pdb plus a rotated, shifted copy named "moved".
+    fn two_objects() -> Session {
+        let mut s = Session::default();
+        s.add_object(Arc::new(traces()), None);
+        let (sn, cs) = 0.7f32.sin_cos();
+        let motion = Transform { rotation: [[cs, -sn, 0.0], [sn, cs, 0.0], [0.0, 0.0, 1.0]], translation: [20.0, 5.0, -3.0] };
+        let mut copy = transformed(&traces(), &motion);
+        copy.name = "moved".into();
+        let (name, effects) = s.add_object(Arc::new(copy), None);
+        assert_eq!(name, "moved");
+        assert_eq!(effects[0], Effect::Scene { refit: true });
+        s
+    }
+
+    #[test]
+    fn objects_are_named_ranges_of_the_scene() {
+        let mut s = two_objects();
+        assert_eq!(s.structure.as_ref().unwrap().atom_count(), 54);
+        assert_eq!(s.run("select moved", false).unwrap().atoms, Some(27));
+        assert_eq!(s.run("model traces and name CA", true).unwrap().atoms, Some(6));
+        // bychain stays inside one object even though both have a chain A.
+        assert_eq!(s.run("bychain (moved and resi 1 and chain A)", true).unwrap().atoms, Some(21));
+        assert_eq!(s.run("byobject index 30", true).unwrap().atoms, Some(27));
+        // A second copy of the same file gets a unique name.
+        let (name, _) = s.add_object(Arc::new(traces()), None);
+        assert_eq!(name, "traces_2");
+    }
+
+    #[test]
+    fn disable_hides_without_losing_the_display() {
+        let mut s = two_objects();
+        s.run("disable moved", false).unwrap();
+        let drawn = s.render_display().unwrap();
+        assert!(drawn.reps[27..].iter().all(|r| *r == Reps::NONE));
+        assert!(s.display.as_ref().unwrap().reps[27..].iter().any(|r| *r != Reps::NONE));
+        // Only the enabled object counts as visible: all 27 atoms of "traces" are shown.
+        assert_eq!(s.run("visible", true).unwrap().atoms, Some(27));
+        s.run("enable all", false).unwrap();
+        assert!(s.render_display().unwrap().reps[27..].iter().any(|r| *r != Reps::NONE));
+        assert!(s.run("disable nope", true).is_err());
+    }
+
+    #[test]
+    fn deleting_an_object_remaps_everything() {
+        let mut s = two_objects();
+        s.run("select ends, index 1+54", false).unwrap();
+        s.run("distance index 2, index 6; distance index 30, index 34", false).unwrap();
+        s.run("delete traces", false).unwrap();
+        assert_eq!(s.objects.len(), 1);
+        assert_eq!(s.structure.as_ref().unwrap().atom_count(), 27);
+        // Index 54 (last atom of "moved") is now 27; index 1 belonged to the deleted object.
+        assert_eq!(s.named["ends"].iter().collect::<Vec<_>>(), [26]);
+        // Only the measurement inside "moved" survives, renumbered.
+        assert_eq!(s.measurements.len(), 1);
+        assert_eq!(s.measurements[0].atoms, [2, 6]);
+        s.run("undo", false).unwrap();
+        assert_eq!(s.objects.len(), 2);
+        assert_eq!(s.measurements.len(), 2);
+    }
+
+    #[test]
+    fn align_superposes_the_mobile_object() {
+        let mut s = two_objects();
+        let before = s.run("align moved, traces", true).unwrap();
+        assert!(before.message.starts_with("moved: RMSD = 0.000 Å over 7 residues"), "{}", before.message);
+        s.run("distance index 2, index 29", false).unwrap();
+        assert!(s.measurements[0].value > 5.0);
+        let out = s.run("align moved, traces", false).unwrap();
+        assert_eq!(out.effects[0], Effect::Scene { refit: false });
+        // The copy now sits on the original: CA 1 of each coincide.
+        assert!(s.measurements[0].value < 1e-3, "{}", s.measurements[0].value);
+        assert_ne!(s.objects[1].transform, Transform::IDENTITY);
+        s.run("undo", false).unwrap();
+        assert!(s.measurements[0].value > 5.0);
+        assert!(s.run("align traces or moved, traces", true).unwrap_err().message.contains("several objects"));
     }
 }

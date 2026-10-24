@@ -331,6 +331,18 @@ impl Renderer {
         }
     }
 
+    /// Removes all geometry, markers and measurements.
+    pub fn clear(&mut self) {
+        self.spheres = None;
+        self.joints = None;
+        self.sticks = None;
+        self.cartoon = None;
+        self.surface = None;
+        self.surface_cache = None;
+        self.markers = None;
+        self.dashes = None;
+    }
+
     /// Rebuilds all geometry for `structure` as `display` describes it.
     pub fn set_scene(&mut self, device: &wgpu::Device, structure: &Structure, display: &Display, state: usize) {
         self.spheres = None;

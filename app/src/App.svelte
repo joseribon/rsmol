@@ -20,7 +20,11 @@
   import AtomTooltip from "./lib/AtomTooltip.svelte";
   import MeasurementLabels from "./lib/MeasurementLabels.svelte";
 
-  const info = $derived(consoleState.structure);
+  // The scene, as the panel shows it: one object by name, several as a count.
+  const objects = $derived(consoleState.objects);
+  const info = $derived(objects.length ? consoleState.structure : null);
+  const sceneName = $derived(objects.length === 1 ? objects[0].name : `${objects.length} objects`);
+  const total = (key: "atoms" | "residues") => objects.reduce((n, o) => n + o[key], 0);
   let stats: FrameStats | null = $state(null);
   let dropping = $state(false);
   const EXAMPLES = [
@@ -95,7 +99,7 @@
 
 <header class="titlebar" data-tauri-drag-region>
   <span class="brand" data-tauri-drag-region>rsmol</span>
-  {#if info}<span class="crumb" data-tauri-drag-region>{info.name}</span>{/if}
+  {#if info}<span class="crumb" data-tauri-drag-region>{objects.map((o) => o.name).join(" + ")}</span>{/if}
 </header>
 
 {#if info}
@@ -146,13 +150,42 @@
   {/if}
 
   <aside class="info panel">
-    <h2>{info.name}</h2>
+    <h2>{sceneName}</h2>
     <dl>
-      <dt>Atoms</dt><dd>{fmt(info.atoms)}</dd>
-      <dt>Residues</dt><dd>{fmt(info.residues)}</dd>
-      <dt>States</dt><dd>{fmt(info.states)}</dd>
-      <dt>Parsed</dt><dd>{info.parse_ms.toFixed(0)} ms</dd>
+      <dt>Atoms</dt><dd>{fmt(total("atoms"))}</dd>
+      <dt>Residues</dt><dd>{fmt(total("residues"))}</dd>
+      {#if objects.length === 1}
+        <dt>States</dt><dd>{fmt(info.states)}</dd>
+      {/if}
     </dl>
+
+    {#if objects.length > 1}
+      <h3>Objects</h3>
+      <ul class="objects">
+        {#each objects as o, i (o.name)}
+          <li class:hidden={!o.enabled}>
+            <button
+              class="eye"
+              title={o.enabled ? `disable ${o.name}` : `enable ${o.name}`}
+              aria-label={o.enabled ? `Hide ${o.name}` : `Show ${o.name}`}
+              onclick={() => execute(`${o.enabled ? "disable" : "enable"} ${o.name}`)}
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                <path d="M1.5 7S3.8 3 7 3s5.5 4 5.5 4-2.3 4-5.5 4-5.5-4-5.5-4z" fill="none" stroke="currentColor" stroke-width="1.2" />
+                {#if o.enabled}<circle cx="7" cy="7" r="1.7" fill="currentColor" />{:else}<path d="M2 12 12 2" stroke="currentColor" stroke-width="1.2" />{/if}
+              </svg>
+            </button>
+            <span class="mono name" title={`${fmt(o.atoms)} atoms`}>{o.name}</span>
+            {#if i > 0}
+              <button class="align" title={`align ${o.name}, ${objects[0].name}`} onclick={() => execute(`align ${o.name}, ${objects[0].name}`)}>
+                Align
+              </button>
+            {/if}
+            <button class="remove" title={`delete ${o.name}`} aria-label={`Delete ${o.name}`} onclick={() => execute(`delete ${o.name}`)}>×</button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
 
     <h3>Style</h3>
     <div class="segmented" role="radiogroup" aria-label="Style">
@@ -190,14 +223,18 @@
     {/if}
 
     <h3>Chains</h3>
-    <div class="chains">
-      {#each info.chains.slice(0, 40) as chain}
-        <button class="chip mono" title={`select chain ${chain}`} onclick={() => execute(`select chain ${chain || "''"}`)}>
-          {chain || "–"}
-        </button>
-      {/each}
-      {#if info.chains.length > 40}<span class="more">+{info.chains.length - 40}</span>{/if}
-    </div>
+    {#each objects as o (o.name)}
+      {@const prefix = objects.length > 1 ? `${o.name} and ` : ""}
+      {#if objects.length > 1}<div class="chain-owner mono">{o.name}</div>{/if}
+      <div class="chains">
+        {#each o.chains.slice(0, 40) as chain}
+          <button class="chip mono" title={`select ${prefix}chain ${chain}`} onclick={() => execute(`select ${prefix}chain ${chain || "''"}`)}>
+            {chain || "–"}
+          </button>
+        {/each}
+        {#if o.chains.length > 40}<span class="more">+{o.chains.length - 40}</span>{/if}
+      </div>
+    {/each}
   </aside>
 {/if}
 
@@ -363,6 +400,61 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+  }
+  .objects {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .objects li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+  }
+  .objects li.hidden .name {
+    color: var(--text-faint);
+  }
+  .objects .name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .objects .eye,
+  .objects .remove {
+    display: grid;
+    place-items: center;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    padding: 2px;
+  }
+  .objects .eye:hover {
+    color: var(--text);
+  }
+  .objects .remove:hover {
+    color: var(--danger);
+  }
+  .objects .align {
+    padding: 1px 7px;
+    border-radius: 6px;
+    border: 1px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .objects .align:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+  .chain-owner {
+    margin: 6px 0 3px;
+    font-size: 11px;
+    color: var(--text-faint);
   }
   .measurements {
     list-style: none;

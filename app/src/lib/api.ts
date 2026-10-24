@@ -45,6 +45,14 @@ export interface Label {
   position: [number, number] | null;
 }
 
+export interface ObjectSummary {
+  name: string;
+  atoms: number;
+  residues: number;
+  chains: string[];
+  enabled: boolean;
+}
+
 export interface CommandResult {
   message: string;
   canonical: string | null;
@@ -54,6 +62,7 @@ export interface CommandResult {
   measurements: MeasurementSummary[];
   can_undo: boolean;
   can_redo: boolean;
+  objects: ObjectSummary[];
 }
 
 export interface PickInfo {

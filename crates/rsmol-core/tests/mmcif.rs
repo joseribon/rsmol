@@ -91,3 +91,19 @@ fn atom_labels() {
     assert_eq!(s.atom_label(7), "A/SER 2A/N");
     assert_eq!(s.atom_label(9), "B/HEM 201/FE");
 }
+
+#[test]
+fn concat_offsets_indices_and_pads_states() {
+    let a = fixture(); // 11 atoms, 2 states
+    let b = io::read(format!("{DATA}/traces.pdb")).unwrap(); // 27 atoms, 1 state
+    let s = Structure::concat("scene", &[&a, &b]);
+    assert_eq!(s.atom_count(), 38);
+    assert_eq!(s.residues.len(), a.residues.len() + b.residues.len());
+    assert_eq!(s.chain_of(11).id, b.chain_of(0).id);
+    assert_eq!(s.residue_of(11).atoms.start, 11);
+    assert_eq!(s.state_count(), 2);
+    // traces.pdb has one state, so it repeats in state 2.
+    assert_eq!(s.coords(1).unwrap()[11], b.coords(0).unwrap()[0]);
+    assert!(s.bonds.iter().all(|bond| bond.atoms.iter().all(|&x| (x as usize) < 38)));
+    assert!(s.bonds.iter().any(|bond| bond.atoms[0] >= 11));
+}

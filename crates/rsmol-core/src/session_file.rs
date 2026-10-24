@@ -1,8 +1,11 @@
 //! `.rsmol` session files: a self-contained snapshot of a session.
 //!
-//! The file is gzip-compressed JSON holding the original structure file's bytes (so a session
-//! opens anywhere, without the source file or a network), the per-atom display state as base64
-//! blobs, named selections as index ranges, measurements, and the camera.
+//! The file is gzip-compressed JSON holding each object's original structure file (so a session
+//! opens anywhere, without the source files or a network) with the transform applied to it
+//! (e.g. by `align`), the per-atom display state of the merged scene as base64 blobs, named
+//! selections as index ranges, measurements, and the camera.
+//!
+//! Version 1 files held a single `source` instead of `objects`; they still open.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -15,11 +18,12 @@ use serde::{Deserialize, Serialize};
 use crate::display::{Display, Reps};
 use crate::measure::{Measurement, MeasurementKind};
 use crate::select::AtomSet;
-use crate::session::{Session, Source};
+use crate::session::{Object, Session, Source};
+use crate::superpose::Transform;
 
 pub const EXTENSION: &str = "rsmol";
 const FORMAT: &str = "rsmol-session";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Camera placement, stored as plain data so the core stays free of renderer types.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -35,12 +39,27 @@ pub struct CameraState {
 struct File {
     format: String,
     version: u32,
-    source: SourceData,
+    /// Version 2+.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    objects: Vec<ObjectData>,
+    /// Version 1 only: the single structure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<SourceData>,
     display: DisplayData,
     /// Name → inclusive atom index ranges.
     selections: Vec<(String, Vec<[u32; 2]>)>,
     measurements: Vec<MeasurementData>,
     camera: Option<CameraState>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ObjectData {
+    name: String,
+    #[serde(flatten)]
+    source: SourceData,
+    enabled: bool,
+    rotation: [[f32; 3]; 3],
+    translation: [f32; 3],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -86,10 +105,20 @@ fn ranges(set: &AtomSet) -> Vec<[u32; 2]> {
 }
 
 impl Session {
-    /// Serializes the session. Fails if no structure (with its source bytes) is loaded.
+    /// Serializes the session. Fails if nothing is loaded, or an object has no source file.
     pub fn save(&self, camera: Option<CameraState>) -> Result<Vec<u8>, String> {
-        let source = self.source.as_ref().ok_or("nothing to save: no structure is loaded")?;
         let display = self.display.as_ref().ok_or("nothing to save: no structure is loaded")?;
+        let mut objects = Vec::with_capacity(self.objects.len());
+        for o in &self.objects {
+            let source = o.source.as_ref().ok_or_else(|| format!("object {} has no source file to embed", o.name))?;
+            objects.push(ObjectData {
+                name: o.name.clone(),
+                source: SourceData { file_name: source.file_name.clone(), data: BASE64.encode(source.data.as_slice()) },
+                enabled: o.enabled,
+                rotation: o.transform.rotation,
+                translation: o.transform.translation,
+            });
+        }
         let reps: Vec<u8> = display.reps.iter().map(|r| r.bits()).collect();
         let colors: Vec<u8> = display.colors.iter().flatten().copied().collect();
         let mut selections: Vec<_> = self.named.iter().map(|(name, set)| (name.clone(), ranges(set))).collect();
@@ -97,7 +126,8 @@ impl Session {
         let file = File {
             format: FORMAT.to_owned(),
             version: VERSION,
-            source: SourceData { file_name: source.file_name.clone(), data: BASE64.encode(source.data.as_slice()) },
+            objects,
+            source: None,
             display: DisplayData { atoms: display.reps.len(), reps: BASE64.encode(reps), colors: BASE64.encode(colors) },
             selections,
             measurements: self
@@ -126,19 +156,47 @@ impl Session {
         if file.version > VERSION {
             return Err(format!("session file version {} is newer than this app supports ({VERSION})", file.version));
         }
+        let mut object_data = file.objects;
+        if let Some(source) = file.source {
+            object_data.push(ObjectData {
+                name: String::new(),
+                source,
+                enabled: true,
+                rotation: Transform::IDENTITY.rotation,
+                translation: Transform::IDENTITY.translation,
+            });
+        }
+        if object_data.is_empty() {
+            return Err("session file holds no structures".into());
+        }
 
-        let data = BASE64.decode(&file.source.data).map_err(|e| format!("damaged structure data: {e}"))?;
-        let structure = crate::io::parse_bytes(&data, &file.source.file_name).map_err(|e| e.to_string())?;
-        let n = structure.atom_count();
+        let mut session = Session::default();
+        for o in object_data {
+            let data = BASE64.decode(&o.source.data).map_err(|e| format!("damaged structure data: {e}"))?;
+            let parsed = crate::io::parse_bytes(&data, &o.source.file_name).map_err(|e| e.to_string())?;
+            let transform = Transform { rotation: o.rotation, translation: o.translation };
+            let structure = if transform == Transform::IDENTITY { parsed } else { transform_structure(parsed, &transform) };
+            session.objects.push(Object {
+                name: if o.name.is_empty() { structure.name.clone() } else { o.name },
+                structure: Arc::new(structure),
+                source: Some(Source { file_name: o.source.file_name, data: Arc::new(data) }),
+                transform,
+                enabled: o.enabled,
+            });
+        }
+        session.rebuild_scene();
+        let scene = session.structure.clone().expect("objects were loaded");
+        let n = scene.atom_count();
+
         let reps = BASE64.decode(&file.display.reps).map_err(|e| e.to_string())?;
         let colors = BASE64.decode(&file.display.colors).map_err(|e| e.to_string())?;
         if file.display.atoms != n || reps.len() != n || colors.len() != n * 4 {
-            return Err(format!("session display covers {} atoms but the structure has {n}", file.display.atoms));
+            return Err(format!("session display covers {} atoms but the structures have {n}", file.display.atoms));
         }
-        let display = Display {
+        session.display = Some(Display {
             reps: reps.into_iter().map(Reps::from_bits).collect(),
             colors: colors.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect(),
-        };
+        });
 
         let in_range = |i: usize| (i < n).then_some(i).ok_or_else(|| format!("atom index {i} out of range"));
         let mut named = HashMap::new();
@@ -152,8 +210,8 @@ impl Session {
             }
             named.insert(name, set);
         }
-        let coords = structure.coords(0).unwrap_or_default();
-        let mut measurements = Vec::new();
+        session.named = named;
+        let coords = scene.coords(0).unwrap_or_default();
         for m in file.measurements {
             let kind = match m.kind.as_str() {
                 "distance" => MeasurementKind::Distance,
@@ -167,16 +225,19 @@ impl Session {
             for &a in &m.atoms {
                 in_range(a)?;
             }
-            measurements.push(Measurement::new(m.name, kind, m.atoms, coords));
+            session.measurements.push(Measurement::new(m.name, kind, m.atoms, coords));
         }
-
-        let mut session = Session::default();
-        session.load_with_source(Arc::new(structure), Source { file_name: file.source.file_name, data: Arc::new(data) });
-        session.display = Some(display);
-        session.named = named;
-        session.measurements = measurements;
         Ok((session, file.camera))
     }
+}
+
+fn transform_structure(mut s: crate::Structure, t: &Transform) -> crate::Structure {
+    for state in &mut s.states {
+        for p in state.iter_mut() {
+            *p = t.apply(*p);
+        }
+    }
+    s
 }
 
 #[cfg(test)]
@@ -202,6 +263,29 @@ mod tests {
         assert_eq!(restored.structure.as_ref().unwrap().atom_count(), 27);
         // Undo history is not saved: a reopened session starts fresh.
         assert!(!restored.can_undo());
+    }
+
+    #[test]
+    fn objects_and_transforms_round_trip() {
+        let read = |f: &str| std::fs::read(format!("{}/tests/data/{f}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let (a, b) = (read("traces.pdb"), read("two_models.cif"));
+        let mut s = Session::default();
+        let source = |f: &str, d: &Vec<u8>| Source { file_name: f.into(), data: Arc::new(d.clone()) };
+        s.add_object(Arc::new(crate::io::parse_bytes(&a, "traces.pdb").unwrap()), Some(source("traces.pdb", &a)));
+        s.add_object(Arc::new(crate::io::parse_bytes(&b, "two_models.cif").unwrap()), Some(source("two_models.cif", &b)));
+        // Move the second object so the transform has to be stored.
+        let shift = Transform { translation: [10.0, 0.0, 0.0], ..Transform::IDENTITY };
+        let moved = transform_structure((*s.objects[1].structure).clone(), &shift);
+        s.objects[1].structure = Arc::new(moved);
+        s.objects[1].transform = shift;
+        s.objects[1].enabled = false;
+        s.rebuild_scene();
+
+        let (restored, _) = Session::open(&s.save(None).unwrap()).unwrap();
+        assert_eq!(restored.objects.len(), 2);
+        assert_eq!(restored.objects[1].transform, shift);
+        assert!(!restored.objects[1].enabled);
+        assert_eq!(restored.structure.unwrap().states, s.structure.unwrap().states);
     }
 
     #[test]

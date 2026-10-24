@@ -14,6 +14,7 @@ pub mod select;
 pub mod session;
 pub mod session_file;
 pub mod spatial;
+pub mod superpose;
 pub mod surface;
 mod structure;
 

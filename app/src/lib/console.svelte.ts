@@ -11,6 +11,7 @@ import {
   type CommandResult,
   type SelectionError,
   type MeasurementSummary,
+  type ObjectSummary,
   type PickInfo,
   type SelectionSummary,
   type StructureInfo,
@@ -38,6 +39,8 @@ export const consoleState = $state({
   measurements: [] as MeasurementSummary[],
   canUndo: false,
   canRedo: false,
+  /** Loaded objects, in scene order; empty shows the start screen. */
+  objects: [] as ObjectSummary[],
   /** Measure tool: atoms picked so far, or null when the tool is off. */
   measuring: null as PickInfo[] | null,
 });
@@ -99,7 +102,7 @@ export async function openFile(path: string) {
   const info = await loading(() => loadStructure(path));
   if (!info) return;
   const isSession = path.toLowerCase().endsWith(`.${SESSION_EXTENSION}`);
-  if (isSession) applyState(await sessionState());
+  applyState(await sessionState());
   const name = isSession ? (path.split("/").pop() ?? info.name) : info.name;
   remember({ kind: "file", path, name });
   log({ input: isSession ? `open ${name}` : `load ${name}`, output: `${info.atoms.toLocaleString("en-US")} atoms`, ok: true });
@@ -143,6 +146,7 @@ async function fetchEntry(id: string): Promise<Outcome> {
     return { ok: false, error: { start: 0, end: 0, message } };
   }
   remember({ kind: "fetch", id });
+  applyState(await sessionState());
   const message = `${info.name}: ${info.atoms.toLocaleString("en-US")} atoms in ${info.parse_ms.toFixed(0)} ms`;
   return { ok: true, value: { ...emptyResult(), message, atoms: info.atoms } };
 }
@@ -159,10 +163,6 @@ async function loading(load: () => Promise<StructureInfo>): Promise<StructureInf
   try {
     const info = await load();
     consoleState.structure = info;
-    consoleState.selection = null;
-    consoleState.measurements = [];
-    consoleState.canUndo = false;
-    consoleState.canRedo = false;
     if (consoleState.measuring) consoleState.measuring = [];
     return info;
   } catch (e) {
@@ -178,11 +178,23 @@ function applyState(r: CommandResult) {
   consoleState.measurements = r.measurements;
   consoleState.canUndo = r.can_undo;
   consoleState.canRedo = r.can_redo;
+  consoleState.objects = r.objects;
+  // Everything deleted: back to the start screen.
+  if (r.objects.length === 0) consoleState.structure = null;
 }
 
 /** A result for actions handled in the UI (fetch), with no session state attached. */
 function emptyResult(): CommandResult {
-  return { message: "", canonical: null, atoms: null, selection: null, measurements: [], can_undo: false, can_redo: false };
+  return {
+    message: "",
+    canonical: null,
+    atoms: null,
+    selection: consoleState.selection,
+    measurements: consoleState.measurements,
+    can_undo: consoleState.canUndo,
+    can_redo: consoleState.canRedo,
+    objects: consoleState.objects,
+  };
 }
 
 function log(entry: Entry) {

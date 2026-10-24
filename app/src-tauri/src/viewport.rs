@@ -32,8 +32,9 @@ pub enum CameraAction {
 pub enum Msg {
     Camera(CameraAction),
     Resize { width: u32, height: u32 },
-    /// A new structure and how to display it; resets the camera and markers.
-    Load(Arc<Structure>, Display),
+    /// The merged scene changed (objects added, removed or moved), or is now empty. `refit`
+    /// frames everything; otherwise the camera stays put (e.g. after `align`).
+    Scene { structure: Option<Arc<Structure>>, display: Option<Display>, refit: bool },
     /// New display state for the loaded structure.
     Display(Display),
     /// Atoms to mark as selected; empty clears the markers.
@@ -210,13 +211,18 @@ impl ViewportState {
                     self.renderer.resize(&self.device, width, height);
                 }
             }
-            Msg::Load(structure, display) => {
-                self.renderer.set_scene(&self.device, &structure, &display, 0);
-                self.renderer.set_highlight(&self.device, &[], []);
-                self.renderer.set_measurements(&self.device, &[]);
-                self.measurements.clear();
-                self.structure = Some(structure);
-                self.fit_camera();
+            Msg::Scene { structure, display, refit } => {
+                match (&structure, &display) {
+                    (Some(s), Some(d)) => self.renderer.set_scene(&self.device, s, d, 0),
+                    _ => {
+                        self.renderer.clear();
+                        self.measurements.clear();
+                    }
+                }
+                self.structure = structure;
+                if refit {
+                    self.fit_camera();
+                }
             }
             Msg::GetCamera(reply) => {
                 let c = &self.camera;

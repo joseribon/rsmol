@@ -4,6 +4,7 @@
 //!   rsmol-viewer <structure> --screenshot out.png [WxH] [--cmd …]   render offscreen and exit
 //!   … --pick X,Y                         report the atom at pixel (X, Y) of the screenshot
 //!
+//! `--add <file>` loads another structure as a further object (repeatable).
 //! `--cmd` runs a command line (e.g. "show sticks, organic; color coral, chain A; zoom organic")
 //! and may be repeated. Controls: left-drag rotates, right-drag (or shift+left-drag) pans, scroll
 //! zooms, R resets the view, 1–4 apply the presets (cartoon + ligands, cartoon, sticks, spheres).
@@ -43,6 +44,17 @@ fn main() {
 
     let mut session = Session::default();
     session.load(Arc::new(structure));
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--add" {
+            let path = args.get(i + 1).expect("--add needs a structure file");
+            let extra = rsmol_core::io::read(path).unwrap_or_else(|e| {
+                eprintln!("{path}: {e}");
+                std::process::exit(1);
+            });
+            let (name, _) = session.add_object(Arc::new(extra), None);
+            println!("added object {name}");
+        }
+    }
     let mut view = ViewState::default();
     for (i, arg) in args.iter().enumerate() {
         if arg == "--cmd" {
@@ -93,7 +105,7 @@ impl ViewState {
             match effect {
                 Effect::Highlight(atoms) => self.highlight = atoms,
                 Effect::Focus(atoms) => self.focus = atoms,
-                Effect::Display | Effect::Measurements => {}
+                Effect::Display | Effect::Measurements | Effect::Scene { .. } => {}
             }
         }
     }
@@ -120,7 +132,7 @@ fn fitted_camera(session: &Session, view: &ViewState, width: u32, height: u32) -
 
 fn sync_renderer(renderer: &mut Renderer, device: &wgpu::Device, session: &Session, view: &ViewState) {
     let s = structure(session);
-    renderer.set_scene(device, s, session.display.as_ref().unwrap(), 0);
+    renderer.set_scene(device, s, &session.render_display().unwrap(), 0);
     let coords = s.coords(0).unwrap_or_default();
     renderer.set_highlight(device, coords, view.highlight.iter().copied());
     let segments: Vec<_> = session.measurements.iter().flat_map(|m| m.segments(coords)).collect();

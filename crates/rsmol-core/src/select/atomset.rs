@@ -36,6 +36,11 @@ impl AtomSet {
         s
     }
 
+    /// The same atoms in a universe of `len` atoms; atoms at or past `len` are dropped.
+    pub fn resized(&self, len: usize) -> Self {
+        AtomSet::from_indices(len, self.iter().filter(|&i| i < len))
+    }
+
     /// Number of atoms in the structure (the universe), not the number selected.
     pub fn universe(&self) -> usize {
         self.len

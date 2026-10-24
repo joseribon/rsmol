@@ -114,6 +114,45 @@ impl Atoms {
 }
 
 impl Structure {
+    /// Joins structures into one, offsetting residue, chain, entity and bond indices. The result
+    /// has as many states as the part with the most; parts with fewer repeat their last state.
+    pub fn concat(name: &str, parts: &[&Structure]) -> Structure {
+        let mut out = Structure { name: name.to_owned(), ..Default::default() };
+        let states = parts.iter().map(|p| p.state_count()).max().unwrap_or(0);
+        out.states = vec![Vec::new(); states];
+        for p in parts {
+            let (atoms, residues, chains, entities) =
+                (out.atom_count() as u32, out.residues.len() as u32, out.chains.len() as u32, out.entities.len() as u32);
+            let a = &mut out.atoms;
+            a.name.extend_from_slice(&p.atoms.name);
+            a.element.extend_from_slice(&p.atoms.element);
+            a.alt_loc.extend_from_slice(&p.atoms.alt_loc);
+            a.b_factor.extend_from_slice(&p.atoms.b_factor);
+            a.occupancy.extend_from_slice(&p.atoms.occupancy);
+            a.serial.extend_from_slice(&p.atoms.serial);
+            a.hetero.extend_from_slice(&p.atoms.hetero);
+            a.residue.extend(p.atoms.residue.iter().map(|r| r + residues));
+            out.residues.extend(p.residues.iter().map(|r| Residue {
+                chain: r.chain + chains,
+                atoms: r.atoms.start + atoms..r.atoms.end + atoms,
+                ..r.clone()
+            }));
+            out.chains.extend(p.chains.iter().map(|c| Chain {
+                entity: c.entity.map(|e| e + entities),
+                residues: c.residues.start + residues..c.residues.end + residues,
+                ..c.clone()
+            }));
+            out.entities.extend_from_slice(&p.entities);
+            out.bonds.extend(p.bonds.iter().map(|b| Bond { atoms: b.atoms.map(|x| x + atoms), kind: b.kind }));
+            for (k, state) in out.states.iter_mut().enumerate() {
+                if let Some(coords) = p.states.get(k).or(p.states.last()) {
+                    state.extend_from_slice(coords);
+                }
+            }
+        }
+        out
+    }
+
     pub fn atom_count(&self) -> usize {
         self.atoms.len()
     }

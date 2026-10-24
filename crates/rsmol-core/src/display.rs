@@ -80,6 +80,12 @@ impl Display {
     /// take their chain color (light gray for ligands); other elements their element color.
     /// Structures without polymers show every non-water atom as sticks.
     pub fn default_for(s: &Structure) -> Display {
+        Display::default_with_palette_offset(s, 0)
+    }
+
+    /// Like [`Display::default_for`], with chain colors starting `offset` entries into the
+    /// palette, so a second object's chains do not repeat the first object's colors.
+    pub fn default_with_palette_offset(s: &Structure, offset: usize) -> Display {
         let n = s.atom_count();
         let class = |text: &str| Evaluator::new(s, 0).eval(&parse(text).unwrap()).unwrap();
         let polymer = class("polymer");
@@ -97,7 +103,7 @@ impl Display {
                 reps[i] = Reps::STICKS;
             }
         }
-        let colors = default_colors(s, &ligands);
+        let colors = default_colors(s, &ligands, offset);
         Display { reps, colors }
     }
 
@@ -134,18 +140,28 @@ impl Display {
 
 /// Chain colors for carbons, keyed by author chain ID so ligand segments match their chain.
 pub fn chain_colors(s: &Structure) -> Vec<Rgba> {
+    chain_colors_from(s, 0)
+}
+
+/// Chain colors starting `offset` entries into the palette.
+pub fn chain_colors_from(s: &Structure, offset: usize) -> Vec<Rgba> {
     let mut index: HashMap<&str, usize> = HashMap::new();
     s.chains
         .iter()
         .map(|c| {
             let next = index.len();
-            color::chain(*index.entry(c.id.as_str()).or_insert(next))
+            color::chain(offset + *index.entry(c.id.as_str()).or_insert(next))
         })
         .collect()
 }
 
-fn default_colors(s: &Structure, ligands: &AtomSet) -> Vec<Rgba> {
-    let chains = chain_colors(s);
+/// Number of distinct author chain IDs, i.e. palette entries a structure uses.
+pub fn chain_count(s: &Structure) -> usize {
+    s.chains.iter().map(|c| c.id.as_str()).collect::<std::collections::HashSet<_>>().len()
+}
+
+fn default_colors(s: &Structure, ligands: &AtomSet, offset: usize) -> Vec<Rgba> {
+    let chains = chain_colors_from(s, offset);
     (0..s.atom_count())
         .map(|i| {
             color::element(s.atoms.element[i]).unwrap_or(if ligands.contains(i) {

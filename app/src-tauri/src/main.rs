@@ -105,7 +105,12 @@ async fn load(path: PathBuf, viewport: &Viewport, session: &Mutex<Session>) -> R
     .await
     .map_err(|e| e.to_string())??;
 
-    let structure = loaded.structure.clone().expect("loading sets the structure");
+    // A structure file joins the current session as a new object; a session file replaces it.
+    let structure = if is_session {
+        loaded.structure.clone().expect("sessions hold structures")
+    } else {
+        loaded.objects[0].structure.clone()
+    };
     let chains: BTreeSet<_> = structure.chains.iter().map(|c| c.id.clone()).collect();
     let info = StructureInfo {
         name: structure.name.clone(),
@@ -116,17 +121,40 @@ async fn load(path: PathBuf, viewport: &Viewport, session: &Mutex<Session>) -> R
         states: structure.state_count(),
         parse_ms: start.elapsed().as_secs_f64() * 1e3,
     };
-    let display = loaded.display.clone().expect("loading sets the display");
-    let measurements = loaded.measurements.clone();
-    let highlight = loaded.named.get("sele").map(|set| set.iter().collect()).unwrap_or_default();
-    *session.lock().unwrap() = loaded;
-    viewport.send(Msg::Load(structure, display))?;
-    viewport.send(Msg::Measurements(measurements))?;
-    viewport.send(Msg::Highlight(highlight))?;
-    if let Some(camera) = camera {
-        viewport.send(Msg::SetCamera(camera))?;
+    let mut session = session.lock().unwrap();
+    if is_session {
+        *session = loaded;
+        let highlight = session.named.get("sele").map(|set| set.iter().collect()).unwrap_or_default();
+        let effects = vec![Effect::Scene { refit: true }, Effect::Measurements, Effect::Highlight(highlight)];
+        apply_effects(&session, effects, viewport);
+        if let Some(camera) = camera {
+            viewport.send(Msg::SetCamera(camera))?;
+        }
+    } else {
+        let object = loaded.objects.into_iter().next().expect("loading made one object");
+        let (_, effects) = session.add_object(object.structure, object.source);
+        apply_effects(&session, effects, viewport);
     }
     Ok(info)
+}
+
+/// Forwards a command's effects to the render thread.
+fn apply_effects(session: &Session, effects: Vec<Effect>, viewport: &Viewport) {
+    for effect in effects {
+        let msg = match effect {
+            Effect::Highlight(atoms) => Msg::Highlight(atoms),
+            Effect::Focus(atoms) => Msg::Focus(atoms),
+            Effect::Display => match session.render_display() {
+                Some(display) => Msg::Display(display),
+                None => continue,
+            },
+            Effect::Measurements => Msg::Measurements(session.measurements.clone()),
+            Effect::Scene { refit } => {
+                Msg::Scene { structure: session.structure.clone(), display: session.render_display(), refit }
+            }
+        };
+        let _ = viewport.send(msg);
+    }
 }
 
 /// Saves the session (structure, display, selections, measurements, camera) to `path`.
@@ -238,6 +266,15 @@ struct MeasurementSummary {
 }
 
 #[derive(Serialize)]
+struct ObjectSummary {
+    name: String,
+    atoms: usize,
+    residues: usize,
+    chains: Vec<String>,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
 struct CommandResult {
     message: String,
     canonical: Option<String>,
@@ -247,6 +284,7 @@ struct CommandResult {
     measurements: Vec<MeasurementSummary>,
     can_undo: bool,
     can_redo: bool,
+    objects: Vec<ObjectSummary>,
 }
 
 /// Runs a command-bar line. With `dry_run`, only reports what it would do, for live feedback.
@@ -263,15 +301,7 @@ fn run_command(
         end: text[..e.span.end].chars().count(),
         message: e.message,
     })?;
-    for effect in outcome.effects {
-        let msg = match effect {
-            Effect::Highlight(atoms) => Msg::Highlight(atoms),
-            Effect::Focus(atoms) => Msg::Focus(atoms),
-            Effect::Display => Msg::Display(session.display.clone().expect("display exists with a structure")),
-            Effect::Measurements => Msg::Measurements(session.measurements.clone()),
-        };
-        let _ = viewport.send(msg);
-    }
+    apply_effects(&session, outcome.effects, &viewport);
     Ok(state_result(&session, outcome.message, outcome.canonical, outcome.atoms))
 }
 
@@ -290,6 +320,17 @@ fn state_result(session: &Session, message: String, canonical: Option<String>, a
         measurements,
         can_undo: session.can_undo(),
         can_redo: session.can_redo(),
+        objects: session
+            .objects
+            .iter()
+            .map(|o| ObjectSummary {
+                name: o.name.clone(),
+                atoms: o.structure.atom_count(),
+                residues: o.structure.residues.len(),
+                chains: o.structure.chains.iter().map(|c| c.id.clone()).collect::<BTreeSet<_>>().into_iter().collect(),
+                enabled: o.enabled,
+            })
+            .collect(),
     }
 }
 

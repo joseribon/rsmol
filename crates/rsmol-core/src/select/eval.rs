@@ -36,7 +36,8 @@ const NUCLEIC_BACKBONE: &[&str] = &["P", "OP1", "OP2", "OP3", "O1P", "O2P", "O3P
 pub struct Evaluator<'a> {
     s: &'a Structure,
     state: usize,
-    object: &'a str,
+    /// Object names and their atom ranges, in order; one object spanning everything by default.
+    objects: Vec<(String, Range<usize>)>,
     named: Option<&'a HashMap<String, AtomSet>>,
     visible: Option<&'a AtomSet>,
     /// Polymer kind of each residue, from the backbone traces.
@@ -74,7 +75,7 @@ impl<'a> Evaluator<'a> {
         Evaluator {
             s,
             state,
-            object: &s.name,
+            objects: vec![(s.name.clone(), 0..s.atom_count())],
             named: None,
             visible: None,
             polymer,
@@ -90,6 +91,17 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Atoms currently shown, for the `visible` keyword.
+    /// The objects a merged scene is made of, as (name, atom range) in order.
+    pub fn with_objects(mut self, objects: Vec<(String, Range<usize>)>) -> Self {
+        self.objects = objects;
+        self
+    }
+
+    /// Index into `objects` of the object holding `atom`.
+    fn object_of(&self, atom: usize) -> usize {
+        self.objects.partition_point(|(_, r)| r.end <= atom).min(self.objects.len().saturating_sub(1))
+    }
+
     pub fn with_visible(mut self, visible: &'a AtomSet) -> Self {
         self.visible = Some(visible);
         self
@@ -124,7 +136,8 @@ impl<'a> Evaluator<'a> {
                         patterns.iter().any(|p| glob(p, code, false) || (p.is_empty() && code == "L"))
                     }),
                     Property::Model => {
-                        if matches(self.object, false) { AtomSet::full(n) } else { AtomSet::empty(n) }
+                        let hit: Vec<bool> = self.objects.iter().map(|(name, _)| matches(name, false)).collect();
+                        AtomSet::from_fn(n, |i| hit[self.object_of(i)])
                     }
                 }
             }
@@ -203,8 +216,8 @@ impl<'a> Evaluator<'a> {
         if let Some(set) = self.named.and_then(|m| m.get(name)) {
             return Ok(set.clone());
         }
-        if name.eq_ignore_ascii_case(self.object) {
-            return Ok(AtomSet::full(n));
+        if let Some((_, range)) = self.objects.iter().find(|(o, _)| o.eq_ignore_ascii_case(name)) {
+            return Ok(AtomSet::from_indices(n, range.clone()));
         }
         Err(EvalError { span: Some(span.clone()), message: format!("no selection or object named '{name}'") })
     }
@@ -279,11 +292,16 @@ impl<'a> Evaluator<'a> {
                 }
                 AtomSet::from_fn(n, |i| hit[s.residue_of(i).chain as usize])
             }
+            // Chains are per object: chain A of one structure is not chain A of another.
             Grouping::Chain => {
-                let ids: std::collections::HashSet<&str> = set.iter().map(|i| s.chain_of(i).id.as_str()).collect();
-                AtomSet::from_fn(n, |i| ids.contains(s.chain_of(i).id.as_str()))
+                let key = |i: usize| (self.object_of(i), s.chain_of(i).id.as_str());
+                let ids: std::collections::HashSet<_> = set.iter().map(key).collect();
+                AtomSet::from_fn(n, |i| ids.contains(&key(i)))
             }
-            Grouping::Object => if set.is_empty() { AtomSet::empty(n) } else { AtomSet::full(n) },
+            Grouping::Object => {
+                let hit: std::collections::HashSet<usize> = set.iter().map(|i| self.object_of(i)).collect();
+                AtomSet::from_fn(n, |i| hit.contains(&self.object_of(i)))
+            }
             Grouping::Molecule => {
                 // Connected components over bonds, via union-find with path halving.
                 let mut parent: Vec<u32> = (0..n as u32).collect();
