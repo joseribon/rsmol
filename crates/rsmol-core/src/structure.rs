@@ -17,7 +17,8 @@ pub struct Structure {
     pub residues: Vec<Residue>,
     pub chains: Vec<Chain>,
     pub entities: Vec<Entity>,
-    /// Bonds read from the file (CONECT / struct_conn). Sorted, deduplicated, `atoms[0] < atoms[1]`.
+    /// Bonds from the file (CONECT / struct_conn) plus covalent bonds inferred from distances.
+    /// Sorted, deduplicated, `atoms[0] < atoms[1]`.
     pub bonds: Vec<Bond>,
     /// One coordinate set per state; each has `atoms.len()` entries.
     pub states: Vec<Vec<Vec3>>,

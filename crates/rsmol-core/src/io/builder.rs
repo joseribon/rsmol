@@ -109,6 +109,7 @@ impl StructureBuilder {
         self.assign_secondary_structure();
         self.s.bonds.sort_unstable();
         self.s.bonds.dedup_by_key(|b| b.atoms);
+        crate::bonds::assign(&mut self.s, 0);
         Ok(self.s)
     }
 

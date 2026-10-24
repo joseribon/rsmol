@@ -50,10 +50,13 @@ fn secondary_structure() {
 #[test]
 fn struct_conn_bonds() {
     let s = fixture();
-    // Symmetry-mate and hydrogen-bond records are skipped; the covalent partner without an
-    // alt id binds the first conformer.
-    let bonds: Vec<_> = s.bonds.iter().map(|b| (b.atoms, b.kind)).collect();
-    assert_eq!(bonds, [([5, 7], BondKind::Covalent), ([8, 9], BondKind::MetalCoordination)]);
+    let kind = |pair: [u32; 2]| s.bonds.iter().find(|b| b.atoms == pair).map(|b| b.kind);
+    // The covalent partner without an alt id binds the first conformer.
+    assert_eq!(kind([5, 7]), Some(BondKind::Covalent));
+    assert_eq!(kind([8, 9]), Some(BondKind::MetalCoordination));
+    // Skipped records: the bond to a symmetry mate (FE–HOH) and the hydrogen bond (O–N).
+    assert_eq!(kind([9, 10]), None);
+    assert_eq!(kind([3, 8]), None);
 }
 
 #[test]
