@@ -23,4 +23,4 @@ pub fn vdw_radius(e: Element) -> f32 {
 
 /// Selection markers: PyMOL's familiar pink, drawn as small overlay spheres.
 pub const SELECTION: [u8; 4] = [255, 92, 200, 255];
-pub const MARKER_RADIUS: f32 = 0.45;
+pub const MARKER_RADIUS: f32 = 0.3;

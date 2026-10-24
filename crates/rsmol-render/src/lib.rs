@@ -207,7 +207,7 @@ impl Renderer {
                         buffer: Option<wgpu::VertexBufferLayout>,
                         topology: wgpu::PrimitiveTopology,
                         kind: Kind| {
-            let constants: &[(&str, f64)] = if matches!(kind, Kind::Overlay) { &[("ALPHA", 0.8)] } else { &[] };
+            let constants: &[(&str, f64)] = if matches!(kind, Kind::Overlay) { &[("ALPHA", 0.55)] } else { &[] };
             let options = wgpu::PipelineCompilationOptions { constants, ..Default::default() };
             let (format, blend) = match kind {
                 Kind::Scene => (SCENE_FORMAT, None),
