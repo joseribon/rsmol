@@ -37,6 +37,9 @@ pub fn element_color(e: Element) -> Option<[u8; 4]> {
     })
 }
 
+/// Ligand carbons: a light neutral that reads against every chain color.
+pub const LIGAND_CARBON: [u8; 4] = [214, 218, 226, 255];
+
 /// Muted, well-separated hues for carbons, cycled per chain.
 const CHAIN_PALETTE: [[u8; 4]; 10] = [
     [96, 186, 168, 255],

@@ -21,8 +21,9 @@
   // Matches the renderer's default.
   let representation: Representation = $state("ligands");
   const representations: { id: Representation; label: string; hint: string }[] = [
-    { id: "ligands", label: "Cartoon + ligands", hint: "Polymers as cartoon, ligands and ions as spheres" },
+    { id: "ligands", label: "Cartoon + ligands", hint: "Polymers as cartoon, ligands as sticks, ions as spheres" },
     { id: "cartoon", label: "Cartoon", hint: "Polymers only" },
+    { id: "sticks", label: "Sticks", hint: "Every atom and bond, without water" },
     { id: "spheres", label: "Spheres", hint: "Every atom as a van der Waals sphere" },
   ];
 

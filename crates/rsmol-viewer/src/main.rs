@@ -1,10 +1,10 @@
 //! Standalone prototype viewer.
 //!
-//!   rsmol-viewer <structure.{pdb,cif}> [--repr spheres|cartoon|ligands]
+//!   rsmol-viewer <structure.{pdb,cif}> [--repr spheres|sticks|cartoon|ligands]
 //!   rsmol-viewer <structure> --screenshot out.png [WxH]    render offscreen and exit
 //!
 //! Controls: left-drag rotates, right-drag (or shift+left-drag) pans, scroll zooms,
-//! R resets the view, 1/2/3 switch between spheres / cartoon / cartoon + ligands.
+//! R resets the view, 1–4 switch between spheres / sticks / cartoon / cartoon + ligands.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -42,8 +42,9 @@ fn main() {
         None | Some("ligands") => Representation::CartoonAndLigands,
         Some("cartoon") => Representation::Cartoon,
         Some("spheres") => Representation::Spheres,
+        Some("sticks") => Representation::Sticks,
         Some(other) => {
-            eprintln!("unknown representation {other:?}; expected spheres, cartoon or ligands");
+            eprintln!("unknown representation {other:?}; expected spheres, sticks, cartoon or ligands");
             std::process::exit(2);
         }
     };
@@ -203,8 +204,9 @@ impl ApplicationHandler for App {
                 match key.as_str() {
                     "r" => g.camera = fitted_camera(&self.structure, g.config.width, g.config.height),
                     "1" => g.renderer.representation = Representation::Spheres,
-                    "2" => g.renderer.representation = Representation::Cartoon,
-                    "3" => g.renderer.representation = Representation::CartoonAndLigands,
+                    "2" => g.renderer.representation = Representation::Sticks,
+                    "3" => g.renderer.representation = Representation::Cartoon,
+                    "4" => g.renderer.representation = Representation::CartoonAndLigands,
                     _ => return,
                 }
                 g.window.request_redraw();

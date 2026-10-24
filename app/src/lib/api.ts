@@ -23,7 +23,7 @@ export type CameraAction =
   | { kind: "zoom"; factor: number }
   | { kind: "reset" };
 
-export type Representation = "spheres" | "cartoon" | "ligands";
+export type Representation = "spheres" | "sticks" | "cartoon" | "ligands";
 
 export interface FrameStats {
   frame_ms: number;

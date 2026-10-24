@@ -29,6 +29,7 @@ pub enum CameraAction {
 #[serde(rename_all = "lowercase")]
 pub enum RepresentationArg {
     Spheres,
+    Sticks,
     Cartoon,
     Ligands,
 }
@@ -37,6 +38,7 @@ impl From<RepresentationArg> for Representation {
     fn from(r: RepresentationArg) -> Self {
         match r {
             RepresentationArg::Spheres => Representation::Spheres,
+            RepresentationArg::Sticks => Representation::Sticks,
             RepresentationArg::Cartoon => Representation::Cartoon,
             RepresentationArg::Ligands => Representation::CartoonAndLigands,
         }

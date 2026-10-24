@@ -3,6 +3,7 @@
 //! Window-system agnostic: the host (winit viewer, Tauri shell, browser canvas) owns the surface
 //! and hands the renderer a texture view to draw into each frame.
 
+pub mod atoms;
 mod camera;
 pub mod cartoon;
 pub mod style;
@@ -10,6 +11,7 @@ pub mod style;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use atoms::{SphereInstance, StickInstance};
 use bytemuck::{Pod, Zeroable};
 use rsmol_core::{EntityKind, Structure, backbone};
 use wgpu::util::DeviceExt;
@@ -23,9 +25,11 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub enum Representation {
     /// Every atom as a van der Waals sphere.
     Spheres,
+    /// Every non-water atom as licorice sticks; ions as small spheres.
+    Sticks,
     /// Polymer backbones only.
     Cartoon,
-    /// Cartoon for polymers plus spheres for ligands and ions (no water).
+    /// Cartoon for polymers plus sticks for ligands and small spheres for ions (no water).
     #[default]
     CartoonAndLigands,
 }
@@ -37,18 +41,16 @@ struct Uniforms {
     proj: [[f32; 4]; 4],
 }
 
-/// Per-atom GPU data for the sphere representation: 20 bytes.
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct SphereInstance {
-    center: [f32; 3],
-    radius: f32,
-    color: [u8; 4],
-}
-
 struct Instances {
     buffer: wgpu::Buffer,
     count: u32,
+}
+
+/// Bond cylinders plus the spheres that round off their joints (and mark ions).
+#[derive(Default)]
+struct StickSet {
+    joints: Option<Instances>,
+    bonds: Option<Instances>,
 }
 
 struct GpuMesh {
@@ -59,11 +61,13 @@ struct GpuMesh {
 
 pub struct Renderer {
     sphere_pipeline: wgpu::RenderPipeline,
+    stick_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     all_spheres: Option<Instances>,
-    ligand_spheres: Option<Instances>,
+    all_sticks: StickSet,
+    ligand_sticks: StickSet,
     cartoon: Option<GpuMesh>,
     depth: wgpu::TextureView,
     size: (u32, u32),
@@ -154,6 +158,18 @@ impl Renderer {
             },
             wgpu::PrimitiveTopology::TriangleStrip,
         );
+        let stick_pipeline = pipeline(
+            "sticks",
+            &shader(device, "sticks", include_str!("stick.wgsl")),
+            wgpu::VertexBufferLayout {
+                array_stride: size_of::<StickInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Unorm8x4, 4 => Unorm8x4
+                ],
+            },
+            wgpu::PrimitiveTopology::TriangleStrip,
+        );
         let mesh_pipeline = pipeline(
             "mesh",
             &shader(device, "mesh", include_str!("mesh.wgsl")),
@@ -167,11 +183,13 @@ impl Renderer {
 
         Renderer {
             sphere_pipeline,
+            stick_pipeline,
             mesh_pipeline,
             uniforms,
             bind_group,
             all_spheres: None,
-            ligand_spheres: None,
+            all_sticks: StickSet::default(),
+            ligand_sticks: StickSet::default(),
             cartoon: None,
             depth: create_depth(device, width, height),
             size: (width, height),
@@ -189,12 +207,15 @@ impl Renderer {
     }
 
     /// Uploads every representation of `structure` so switching between them is instant.
-    /// Carbons and cartoons are colored by author chain.
+    /// Carbons and cartoons are colored by author chain; ligand carbons are light gray so they
+    /// stand out against the cartoon.
     pub fn set_structure(&mut self, device: &wgpu::Device, structure: &Structure, state: usize) {
         self.all_spheres = None;
-        self.ligand_spheres = None;
+        self.all_sticks = StickSet::default();
+        self.ligand_sticks = StickSet::default();
         self.cartoon = None;
         let Some(coords) = structure.coords(state) else { return };
+        let n = coords.len();
 
         let mut auth_index: HashMap<&str, usize> = HashMap::new();
         let chain_colors: Vec<[u8; 4]> = structure
@@ -211,24 +232,21 @@ impl Renderer {
         for r in traces.iter().flat_map(|t| &t.residues) {
             in_trace[*r as usize] = true;
         }
+        let residue_of = |i: usize| structure.atoms.residue[i] as usize;
+        let water: Vec<bool> = (0..n).map(|i| is_water(structure, residue_of(i))).collect();
+        let ligand: Vec<bool> = (0..n).map(|i| !in_trace[residue_of(i)] && !water[i]).collect();
+        let not_water: Vec<bool> = water.iter().map(|w| !w).collect();
 
-        let sphere = |i: usize| {
-            let element = structure.atoms.element[i];
-            let residue = structure.atoms.residue[i] as usize;
-            let color = style::element_color(element)
-                .unwrap_or(chain_colors[structure.residues[residue].chain as usize]);
-            SphereInstance { center: coords[i], radius: style::vdw_radius(element), color }
+        let color = |i: usize| {
+            style::element_color(structure.atoms.element[i])
+                .unwrap_or(chain_colors[structure.residues[residue_of(i)].chain as usize])
         };
-        let all: Vec<SphereInstance> = (0..coords.len()).map(sphere).collect();
-        let ligands: Vec<SphereInstance> = (0..coords.len())
-            .filter(|&i| {
-                let residue = structure.atoms.residue[i] as usize;
-                !in_trace[residue] && !is_water(structure, residue)
-            })
-            .map(sphere)
-            .collect();
-        self.all_spheres = upload_instances(device, "spheres", &all);
-        self.ligand_spheres = upload_instances(device, "ligand spheres", &ligands);
+        let ligand_color =
+            |i: usize| style::element_color(structure.atoms.element[i]).unwrap_or(style::LIGAND_CARBON);
+
+        self.all_spheres = upload_instances(device, "spheres", &atoms::spheres(structure, coords, &vec![true; n], color));
+        self.all_sticks = upload_sticks(device, "all", atoms::sticks(structure, coords, &not_water, color));
+        self.ligand_sticks = upload_sticks(device, "ligand", atoms::sticks(structure, coords, &ligand, ligand_color));
 
         let mesh = cartoon::build(structure, state, &traces, |t| chain_colors[t.chain as usize]);
         if !mesh.indices.is_empty() {
@@ -276,10 +294,11 @@ impl Renderer {
         pass.set_bind_group(0, &self.bind_group, &[]);
 
         // Structures without polymers (small molecules) have no cartoon; show their atoms.
-        let (cartoon, spheres) = match (self.representation, &self.cartoon) {
-            (Representation::Spheres, _) | (_, None) => (None, self.all_spheres.as_ref()),
-            (Representation::Cartoon, Some(c)) => (Some(c), None),
-            (Representation::CartoonAndLigands, Some(c)) => (Some(c), self.ligand_spheres.as_ref()),
+        let (cartoon, spheres, sticks) = match (self.representation, &self.cartoon) {
+            (Representation::Spheres, _) => (None, self.all_spheres.as_ref(), None),
+            (Representation::Sticks, _) | (_, None) => (None, None, Some(&self.all_sticks)),
+            (Representation::Cartoon, Some(c)) => (Some(c), None, None),
+            (Representation::CartoonAndLigands, Some(c)) => (Some(c), None, Some(&self.ligand_sticks)),
         };
         if let Some(mesh) = cartoon {
             pass.set_pipeline(&self.mesh_pipeline);
@@ -287,10 +306,16 @@ impl Renderer {
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..mesh.count, 0, 0..1);
         }
-        if let Some(spheres) = spheres {
+        let joints = sticks.and_then(|s| s.joints.as_ref());
+        for spheres in [spheres, joints].into_iter().flatten() {
             pass.set_pipeline(&self.sphere_pipeline);
             pass.set_vertex_buffer(0, spheres.buffer.slice(..));
             pass.draw(0..4, 0..spheres.count);
+        }
+        if let Some(bonds) = sticks.and_then(|s| s.bonds.as_ref()) {
+            pass.set_pipeline(&self.stick_pipeline);
+            pass.set_vertex_buffer(0, bonds.buffer.slice(..));
+            pass.draw(0..4, 0..bonds.count);
         }
     }
 }
@@ -301,7 +326,14 @@ fn is_water(s: &Structure, residue: usize) -> bool {
     entity == Some(EntityKind::Water) || matches!(r.name.as_str(), "HOH" | "WAT" | "DOD" | "H2O" | "TIP3")
 }
 
-fn upload_instances(device: &wgpu::Device, label: &str, instances: &[SphereInstance]) -> Option<Instances> {
+fn upload_sticks(device: &wgpu::Device, label: &str, (joints, bonds): (Vec<SphereInstance>, Vec<StickInstance>)) -> StickSet {
+    StickSet {
+        joints: upload_instances(device, &format!("{label} joints"), &joints),
+        bonds: upload_instances(device, &format!("{label} bonds"), &bonds),
+    }
+}
+
+fn upload_instances<T: Pod>(device: &wgpu::Device, label: &str, instances: &[T]) -> Option<Instances> {
     (!instances.is_empty()).then(|| Instances {
         buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
