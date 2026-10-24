@@ -9,7 +9,7 @@ try:
 except ImportError:
     # The app ships only the pure-Python package; scripts it runs talk to it over a socket.
     Session = None  # type: ignore[assignment,misc]
-    __version__ = "0.2.0"
+    __version__ = "0.2.1"
 
 from . import cmd
 
