@@ -38,6 +38,8 @@ pub enum Msg {
     Highlight(Vec<usize>),
     /// Frame these atoms, or the whole structure for `None`.
     Focus(Option<Vec<usize>>),
+    /// Which atom is drawn at this physical pixel; answered from the latest frame.
+    Pick { x: u32, y: u32, reply: Sender<Option<usize>> },
 }
 
 #[derive(Clone, Serialize)]
@@ -121,7 +123,10 @@ impl ViewportState {
         // A frame that could not be shown (window not yet visible, minimized, …) is retried
         // on a short timer; otherwise the thread sleeps until the next message.
         const RETRY: Duration = Duration::from_millis(16);
+        // `pending`: the last frame was not shown. `drawn`: the id buffer matches the scene, so
+        // picks can be answered without rendering.
         let mut pending = false;
+        let mut drawn = false;
         loop {
             let first = if pending {
                 match rx.recv_timeout(RETRY) {
@@ -134,10 +139,25 @@ impl ViewportState {
                 let Ok(msg) = rx.recv() else { return };
                 Some(msg)
             };
+            let mut picks = Vec::new();
+            let mut changed = pending;
             for msg in first.into_iter().chain(rx.try_iter()) {
-                self.apply(msg);
+                match msg {
+                    Msg::Pick { x, y, reply } => picks.push((x, y, reply)),
+                    msg => {
+                        self.apply(msg);
+                        changed = true;
+                    }
+                }
             }
-            pending = !self.draw();
+            if changed || !drawn {
+                pending = !self.draw();
+                drawn = !pending;
+            }
+            for (x, y, reply) in picks {
+                let atom = if drawn { self.renderer.pick(&self.device, &self.queue, x, y) } else { None };
+                let _ = reply.send(atom);
+            }
         }
     }
 
@@ -199,6 +219,7 @@ impl ViewportState {
                     _ => {}
                 }
             }
+            Msg::Pick { .. } => unreachable!("picks are answered in run()"),
         }
     }
 

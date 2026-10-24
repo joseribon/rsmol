@@ -7,6 +7,7 @@ import {
   runCommand,
   type CommandResult,
   type SelectionError,
+  type PickInfo,
   type SelectionSummary,
   type StructureInfo,
 } from "./api";
@@ -28,6 +29,8 @@ export const consoleState = $state({
   loading: false,
   error: null as string | null,
   recent: readRecent(),
+  /** The atom under the pointer and where to show its tooltip (CSS pixels). */
+  hover: null as { info: PickInfo; x: number; y: number } | null,
 });
 
 const HISTORY_LIMIT = 5;

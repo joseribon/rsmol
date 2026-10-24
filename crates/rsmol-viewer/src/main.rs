@@ -2,6 +2,7 @@
 //!
 //!   rsmol-viewer <structure.{pdb,cif}> [--cmd "<commands>"]...
 //!   rsmol-viewer <structure> --screenshot out.png [WxH] [--cmd …]   render offscreen and exit
+//!   … --pick X,Y                         report the atom at pixel (X, Y) of the screenshot
 //!
 //! `--cmd` runs a command line (e.g. "show sticks, organic; color coral, chain A; zoom organic")
 //! and may be repeated. Controls: left-drag rotates, right-drag (or shift+left-drag) pans, scroll
@@ -66,7 +67,11 @@ fn main() {
             .and_then(|s| s.split_once('x'))
             .map(|(w, h)| (w.parse().unwrap(), h.parse().unwrap()))
             .unwrap_or((1600, 1000));
-        pollster::block_on(screenshot(&session, &view, out, w, h));
+        let pick = args.iter().position(|a| a == "--pick").and_then(|i| args.get(i + 1)).map(|p| {
+            let (x, y) = p.split_once(',').expect("--pick takes X,Y");
+            (x.parse().unwrap(), y.parse().unwrap())
+        });
+        pollster::block_on(screenshot(&session, &view, out, w, h, pick));
         return;
     }
 
@@ -311,7 +316,7 @@ impl FpsCounter {
 }
 
 /// Renders one frame offscreen and writes it as a PNG.
-async fn screenshot(session: &Session, view: &ViewState, out: &str, width: u32, height: u32) {
+async fn screenshot(session: &Session, view: &ViewState, out: &str, width: u32, height: u32, pick: Option<(u32, u32)>) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = instance.request_adapter(&adapter_options(None)).await.unwrap();
     let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
@@ -361,6 +366,13 @@ async fn screenshot(session: &Session, view: &ViewState, out: &str, width: u32, 
     readback.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     println!("first frame (incl. pipeline warm-up): {:.1?} on {}", t.elapsed(), adapter.get_info().name);
+    if let Some((x, y)) = pick {
+        let t = Instant::now();
+        match renderer.pick(&device, &queue, x, y) {
+            Some(atom) => println!("pick ({x}, {y}): {} in {:.2?}", structure(session).atom_label(atom), t.elapsed()),
+            None => println!("pick ({x}, {y}): background in {:.2?}", t.elapsed()),
+        }
+    }
 
     // Steady state: render and wait for the GPU each time, so this is the full frame latency.
     const FRAMES: u32 = 100;

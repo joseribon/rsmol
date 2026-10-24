@@ -15,6 +15,8 @@ pub struct MeshVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [u8; 4],
+    /// Pick id of the residue's guide atom.
+    pub id: u32,
 }
 
 #[derive(Default)]
@@ -145,14 +147,16 @@ fn sweep(mesh: &mut Mesh, coords: &[[f32; 3]], s: &Structure, trace: &Trace, col
             base(i).lerp(base(i + 1), smoothstep(t))
         };
 
-        // Each half-segment takes the color of the nearer residue.
-        let color = color(trace.residues[if t < 0.5 { i } else { i + 1 }]);
+        // Each half-segment takes the color (and pick id) of the nearer residue.
+        let nearer = if t < 0.5 { i } else { i + 1 };
+        let color = color(trace.residues[nearer]);
+        let id = crate::atoms::pick_id(trace.guide_atoms[nearer] as usize);
         for r in 0..RING {
             let theta = TAU * r as f32 / RING as f32;
             let (sin, cos) = theta.sin_cos();
             let offset = d * (profile.width * cos) + normal_dir * (profile.thickness * sin);
             let normal = (d * (cos / profile.width) + normal_dir * (sin / profile.thickness)).normalize();
-            mesh.vertices.push(MeshVertex { position: (pos + offset).into(), normal: normal.into(), color });
+            mesh.vertices.push(MeshVertex { position: (pos + offset).into(), normal: normal.into(), color, id });
         }
         if rings > 0 {
             let a = first_ring + (rings - 1) * RING as u32;
@@ -162,16 +166,16 @@ fn sweep(mesh: &mut Mesh, coords: &[[f32; 3]], s: &Structure, trace: &Trace, col
                 mesh.indices.extend_from_slice(&[a + r, b + r, a + r1, a + r1, b + r, b + r1]);
             }
         }
-        first_center.get_or_insert((pos, -tangent, color));
-        last_center = Some((pos, tangent, color));
+        first_center.get_or_insert((pos, -tangent, color, id));
+        last_center = Some((pos, tangent, color, id));
         rings += 1;
     }
 
     // Close both ends so the tube does not look hollow.
     let last_ring = first_ring + (rings - 1) * RING as u32;
-    for ((center, normal, color), ring) in [(first_center.unwrap(), first_ring), (last_center.unwrap(), last_ring)] {
+    for ((center, normal, color, id), ring) in [(first_center.unwrap(), first_ring), (last_center.unwrap(), last_ring)] {
         let c = mesh.vertices.len() as u32;
-        mesh.vertices.push(MeshVertex { position: center.into(), normal: normal.into(), color });
+        mesh.vertices.push(MeshVertex { position: center.into(), normal: normal.into(), color, id });
         for r in 0..RING as u32 {
             mesh.indices.extend_from_slice(&[c, ring + r, ring + (r + 1) % RING as u32]);
         }

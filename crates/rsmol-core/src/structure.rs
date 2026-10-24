@@ -135,6 +135,23 @@ impl Structure {
         &self.chains[self.residue_of(atom).chain as usize]
     }
 
+    /// PyMOL-style atom label: `chain/resn resi/name`, with insertion code and alt loc,
+    /// e.g. `A/ASP 25/OD1` or `B/SER 27A/CB`B`.
+    pub fn atom_label(&self, atom: usize) -> String {
+        let r = self.residue_of(atom);
+        let mut label = format!("{}/{} {}", self.chain_of(atom).id, r.name, r.seq_num);
+        if let Some(ins) = r.ins_code {
+            label.push(ins);
+        }
+        label.push('/');
+        label.push_str(&self.atoms.name[atom]);
+        if let Some(alt) = self.atoms.alt_loc[atom] {
+            label.push('`');
+            label.push(alt);
+        }
+        label
+    }
+
     /// Whether residue `r` is water, by entity type or by the common residue names.
     pub fn is_water(&self, r: usize) -> bool {
         let residue = &self.residues[r];

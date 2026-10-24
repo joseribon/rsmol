@@ -26,6 +26,8 @@ pub use camera::Camera;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Linear HDR scene target, so lighting is not quantized before the composite.
 const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Per-pixel atom index + 1 (0 = background), for mouse picking.
+const ID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
 
 /// Look of the composite pass. Colors are linear RGB.
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +97,8 @@ struct GpuMesh {
 /// Render targets that depend on the viewport size.
 struct Targets {
     scene: wgpu::TextureView,
+    ids: wgpu::Texture,
+    ids_view: wgpu::TextureView,
     depth: wgpu::TextureView,
     post_bind_group: wgpu::BindGroup,
     size: (u32, u32),
@@ -130,7 +134,7 @@ fn shader(device: &wgpu::Device, label: &str, source: &'static str, common: bool
 const SPHERE_LAYOUT: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
     array_stride: size_of::<SphereInstance>() as u64,
     step_mode: wgpu::VertexStepMode::Instance,
-    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Unorm8x4],
+    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Unorm8x4, 3 => Uint32],
 };
 
 enum Kind {
@@ -236,7 +240,14 @@ impl Renderer {
                     module,
                     entry_point: Some(if matches!(kind, Kind::Overlay) { "fs_marker" } else { "fs_main" }),
                     compilation_options: options,
-                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &if matches!(kind, Kind::Scene) {
+                        vec![
+                            Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL }),
+                            Some(ID_FORMAT.into()),
+                        ]
+                    } else {
+                        vec![Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })]
+                    },
                 }),
                 multiview_mask: None,
                 cache: None,
@@ -254,7 +265,8 @@ impl Renderer {
                 array_stride: size_of::<StickInstance>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &wgpu::vertex_attr_array![
-                    0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Unorm8x4, 4 => Unorm8x4
+                    0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Unorm8x4, 4 => Unorm8x4,
+                    5 => Uint32, 6 => Uint32
                 ],
             }),
             TriangleStrip,
@@ -266,7 +278,7 @@ impl Renderer {
             Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<cartoon::MeshVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4, 3 => Uint32],
             }),
             TriangleList,
             Kind::Scene,
@@ -347,7 +359,7 @@ impl Renderer {
     pub fn set_highlight(&mut self, device: &wgpu::Device, coords: &[Vec3], atoms: impl IntoIterator<Item = usize>) {
         let markers: Vec<SphereInstance> = atoms
             .into_iter()
-            .map(|i| SphereInstance { center: coords[i], radius: style::MARKER_RADIUS, color: style::SELECTION })
+            .map(|i| SphereInstance { center: coords[i], radius: style::MARKER_RADIUS, color: style::SELECTION, id: 0 })
             .collect();
         self.markers = upload(device, "selection markers", &markers);
     }
@@ -378,12 +390,20 @@ impl Renderer {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.scene,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.scene,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.ids_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.targets.depth,
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
@@ -438,6 +458,43 @@ impl Renderer {
     }
 }
 
+impl Renderer {
+    /// The atom drawn at pixel (`x`, `y`) of the last rendered frame, if any. Blocks until the
+    /// GPU has copied that one pixel back.
+    pub fn pick(&self, device: &wgpu::Device, queue: &wgpu::Queue, x: u32, y: u32) -> Option<usize> {
+        let (width, height) = self.targets.size;
+        if x >= width || y >= height {
+            return None;
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pick readback"),
+            size: wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.targets.ids,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: None, rows_per_image: None },
+            },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        let data = buffer.slice(..).get_mapped_range().ok()?;
+        let id = u32::from_le_bytes(data[..4].try_into().ok()?);
+        id.checked_sub(1).map(|i| i as usize)
+    }
+}
+
 /// Backbone traces cut down to runs of at least two residues shown as cartoon.
 fn shown_traces(s: &Structure, state: usize, display: &Display) -> Vec<Trace> {
     let mut out = Vec::new();
@@ -465,22 +522,23 @@ fn shown_traces(s: &Structure, state: usize, display: &Display) -> Vec<Trace> {
 }
 
 fn create_targets(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniforms: &wgpu::Buffer, width: u32, height: u32) -> Targets {
-    let texture = |label, format| {
-        device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            })
-            .create_view(&Default::default())
+    let texture = |label, format, usage| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | usage,
+            view_formats: &[],
+        })
     };
-    let scene = texture("scene color", SCENE_FORMAT);
-    let depth = texture("depth", DEPTH_FORMAT);
+    let sampled = wgpu::TextureUsages::TEXTURE_BINDING;
+    let scene = texture("scene color", SCENE_FORMAT, sampled).create_view(&Default::default());
+    let depth = texture("depth", DEPTH_FORMAT, sampled).create_view(&Default::default());
+    let ids = texture("pick ids", ID_FORMAT, wgpu::TextureUsages::COPY_SRC);
+    let ids_view = ids.create_view(&Default::default());
     let post_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("post"),
         layout,
@@ -490,7 +548,7 @@ fn create_targets(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniform
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth) },
         ],
     });
-    Targets { scene, depth, post_bind_group, size: (width.max(1), height.max(1)) }
+    Targets { scene, ids, ids_view, depth, post_bind_group, size: (width.max(1), height.max(1)) }
 }
 
 fn upload<T: Pod>(device: &wgpu::Device, label: &str, items: &[T]) -> Option<Instances> {

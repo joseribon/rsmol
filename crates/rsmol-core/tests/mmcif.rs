@@ -82,3 +82,12 @@ fn gzipped_files_parse_like_plain_ones() {
     assert!(io::parse_bytes(b"not gzip", "x.cif.gz").unwrap_err().message.starts_with("not a valid gzip file"));
     assert_eq!(io::parse_bytes(b"", "x.xyz").unwrap_err().message, "unknown structure format '.xyz'");
 }
+
+#[test]
+fn atom_labels() {
+    let s = fixture();
+    assert_eq!(s.atom_label(1), "A/GLY 1/CA");
+    assert_eq!(s.atom_label(6), "A/ALA 2/CA`B");
+    assert_eq!(s.atom_label(7), "A/SER 2A/N");
+    assert_eq!(s.atom_label(9), "B/HEM 201/FE");
+}

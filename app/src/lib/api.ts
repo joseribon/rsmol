@@ -41,6 +41,17 @@ export interface CommandResult {
   selection: SelectionSummary | null;
 }
 
+export interface PickInfo {
+  /** 1-based atom index, as the `index` selection keyword expects. */
+  index: number;
+  label: string;
+  chain: string;
+  residue: string;
+  atom: string;
+  element: string;
+  b_factor: number;
+}
+
 export interface Preset {
   name: string;
   commands: string;
@@ -51,6 +62,9 @@ export const loadStructure = (path: string) => invoke<StructureInfo>("load_struc
 export const fetchStructure = (id: string) => invoke<StructureInfo>("fetch_structure", { id });
 export const camera = (action: CameraAction) => invoke<void>("camera", { action });
 export const presets = () => invoke<Preset[]>("presets");
+/** The atom under a point in CSS pixels, or null. */
+export const pick = (x: number, y: number) =>
+  invoke<PickInfo | null>("pick", { x: x * devicePixelRatio, y: y * devicePixelRatio });
 /** Runs a command-bar line; `dryRun` reports what it would do without changing anything. */
 export const runCommand = (text: string, dryRun: boolean) =>
   invoke<CommandResult>("run_command", { text, dryRun });

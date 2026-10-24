@@ -117,6 +117,51 @@ fn camera(action: CameraAction, viewport: State<'_, Viewport>) -> Result<(), Str
 }
 
 #[derive(Serialize)]
+struct PickInfo {
+    /// 1-based, as the `index` selection keyword expects.
+    index: usize,
+    label: String,
+    chain: String,
+    residue: String,
+    atom: String,
+    element: String,
+    b_factor: f32,
+}
+
+/// The atom under physical pixel (`x`, `y`), if any.
+#[tauri::command]
+async fn pick(
+    x: f32,
+    y: f32,
+    viewport: State<'_, Viewport>,
+    session: State<'_, Mutex<Session>>,
+) -> Result<Option<PickInfo>, String> {
+    if x < 0.0 || y < 0.0 {
+        return Ok(None);
+    }
+    let (reply, answer) = std::sync::mpsc::channel();
+    viewport.send(Msg::Pick { x: x as u32, y: y as u32, reply })?;
+    let atom = tauri::async_runtime::spawn_blocking(move || answer.recv_timeout(std::time::Duration::from_millis(250)).ok().flatten())
+        .await
+        .map_err(|e| e.to_string())?;
+    let session = session.lock().unwrap();
+    let (Some(i), Some(s)) = (atom, session.structure.as_ref()) else { return Ok(None) };
+    if i >= s.atom_count() {
+        return Ok(None);
+    }
+    let r = s.residue_of(i);
+    Ok(Some(PickInfo {
+        index: i + 1,
+        label: s.atom_label(i),
+        chain: s.chain_of(i).id.clone(),
+        residue: format!("{} {}{}", r.name, r.seq_num, r.ins_code.map(String::from).unwrap_or_default()),
+        atom: s.atoms.name[i].clone(),
+        element: s.atoms.element[i].symbol().to_owned(),
+        b_factor: s.atoms.b_factor[i],
+    }))
+}
+
+#[derive(Serialize)]
 struct Preset {
     name: &'static str,
     commands: &'static str,
@@ -201,7 +246,7 @@ fn main() {
             app.manage(Mutex::new(Session::default()));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![load_structure, fetch_structure, camera, presets, run_command, startup_file])
+        .invoke_handler(tauri::generate_handler![load_structure, fetch_structure, camera, pick, presets, run_command, startup_file])
         .run(tauri::generate_context!())
         .expect("error while running rsmol");
 }

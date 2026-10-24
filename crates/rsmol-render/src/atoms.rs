@@ -6,16 +6,18 @@ use rsmol_core::{BondKind, Structure, Vec3};
 
 use crate::style;
 
-/// One sphere impostor: 20 bytes.
+/// One sphere impostor: 24 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct SphereInstance {
     pub center: [f32; 3],
     pub radius: f32,
     pub color: [u8; 4],
+    /// Atom index + 1 for picking; 0 picks nothing.
+    pub id: u32,
 }
 
-/// One bond cylinder, colored by atom at each half: 36 bytes.
+/// One bond cylinder, colored by atom at each half: 44 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct StickInstance {
@@ -24,6 +26,13 @@ pub struct StickInstance {
     pub radius: f32,
     pub color_a: [u8; 4],
     pub color_b: [u8; 4],
+    pub id_a: u32,
+    pub id_b: u32,
+}
+
+/// The pick id of atom `i`.
+pub fn pick_id(i: usize) -> u32 {
+    i as u32 + 1
 }
 
 /// Licorice radius in Å, shared by bonds and their joints.
@@ -39,6 +48,7 @@ pub fn spheres(s: &Structure, coords: &[Vec3], display: &Display) -> Vec<SphereI
             center: coords[i],
             radius: style::vdw_radius(s.atoms.element[i]),
             color: display.colors[i],
+            id: pick_id(i),
         })
         .collect()
 }
@@ -74,13 +84,15 @@ pub fn sticks(s: &Structure, coords: &[Vec3], display: &Display, anchors: &[bool
             radius: STICK_RADIUS,
             color_a: display.colors[a],
             color_b: display.colors[b],
+            id_a: pick_id(a),
+            id_b: pick_id(b),
         });
     }
     let spheres = (0..coords.len())
         .filter(|&i| is_stick(i))
         .map(|i| {
             let radius = if bonded[i] { STICK_RADIUS } else { style::vdw_radius(s.atoms.element[i]) * ION_SCALE };
-            SphereInstance { center: coords[i], radius, color: display.colors[i] }
+            SphereInstance { center: coords[i], radius, color: display.colors[i], id: pick_id(i) }
         })
         .collect();
     (spheres, sticks)

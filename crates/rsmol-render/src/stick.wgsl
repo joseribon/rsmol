@@ -8,6 +8,9 @@ struct Instance {
     @location(2) radius: f32,
     @location(3) color_a: vec4<f32>,
     @location(4) color_b: vec4<f32>,
+    /// Atom index + 1 of each end, for picking.
+    @location(5) id_a: u32,
+    @location(6) id_b: u32,
 }
 
 struct VsOut {
@@ -18,6 +21,8 @@ struct VsOut {
     @location(3) @interpolate(flat) radius: f32,
     @location(4) @interpolate(flat) color_a: vec3<f32>,
     @location(5) @interpolate(flat) color_b: vec3<f32>,
+    @location(6) @interpolate(flat) id_a: u32,
+    @location(7) @interpolate(flat) id_b: u32,
 }
 
 // Margin so the quad covers the silhouette under perspective.
@@ -52,11 +57,14 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     out.radius = r;
     out.color_a = srgb_to_linear(inst.color_a.rgb);
     out.color_b = srgb_to_linear(inst.color_b.rgb);
+    out.id_a = inst.id_a;
+    out.id_b = inst.id_b;
     return out;
 }
 
 struct FsOut {
     @location(0) color: vec4<f32>,
+    @location(1) id: u32,
     @builtin(frag_depth) depth: f32,
 }
 
@@ -84,11 +92,13 @@ fn fs_main(in: VsOut) -> FsOut {
     }
     let hit = rd * t;
     let n = (oc + rd * t - ba * (y / baba)) / in.radius;
-    let albedo = select(in.color_b, in.color_a, y < baba * 0.5);
+    let near_a = y < baba * 0.5;
+    let albedo = select(in.color_b, in.color_a, near_a);
 
     let clip = u.proj * vec4(hit, 1.0);
     var out: FsOut;
     out.color = vec4(shade(albedo, n, -rd), 1.0);
+    out.id = select(in.id_b, in.id_a, near_a);
     out.depth = clip.z / clip.w;
     return out;
 }

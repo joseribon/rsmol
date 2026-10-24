@@ -5,6 +5,8 @@ struct Instance {
     @location(0) center: vec3<f32>,
     @location(1) radius: f32,
     @location(2) color: vec4<f32>,
+    /// Atom index + 1 for picking; 0 means "nothing".
+    @location(3) id: u32,
 }
 
 struct VsOut {
@@ -14,6 +16,7 @@ struct VsOut {
     @location(1) @interpolate(flat) center: vec3<f32>,
     @location(2) @interpolate(flat) radius: f32,
     @location(3) @interpolate(flat) color: vec3<f32>,
+    @location(4) @interpolate(flat) id: u32,
 }
 
 // Quad corners for a 4-vertex triangle strip.
@@ -38,11 +41,13 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     out.center = center;
     out.radius = inst.radius;
     out.color = srgb_to_linear(inst.color.rgb);
+    out.id = inst.id;
     return out;
 }
 
 struct FsOut {
     @location(0) color: vec4<f32>,
+    @location(1) id: u32,
     @builtin(frag_depth) depth: f32,
 }
 
@@ -68,6 +73,7 @@ fn fs_main(in: VsOut) -> FsOut {
     let clip = u.proj * vec4(hit.pos, 1.0);
     var out: FsOut;
     out.color = vec4(shade(in.color, hit.normal, -normalize(hit.pos)), 1.0);
+    out.id = in.id;
     out.depth = clip.z / clip.w;
     return out;
 }

@@ -8,6 +8,7 @@
   import Viewport from "./lib/Viewport.svelte";
   import CommandBar from "./lib/CommandBar.svelte";
   import SelectionCard from "./lib/SelectionCard.svelte";
+  import AtomTooltip from "./lib/AtomTooltip.svelte";
 
   const info = $derived(consoleState.structure);
   let stats: FrameStats | null = $state(null);
@@ -52,6 +53,7 @@
 </script>
 
 <Viewport />
+<AtomTooltip />
 
 <header class="titlebar" data-tauri-drag-region>
   <span class="brand" data-tauri-drag-region>rsmol</span>
