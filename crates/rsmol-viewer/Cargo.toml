@@ -1,0 +1,15 @@
+[package]
+name = "rsmol-viewer"
+description = "Standalone winit viewer for prototyping the rsmol renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rsmol-core.workspace = true
+rsmol-render = { path = "../rsmol-render" }
+glam = "0.34"
+png = "0.18"
+pollster = "1"
+wgpu = "30"
+winit = "0.30"

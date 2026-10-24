@@ -1,0 +1,12 @@
+[package]
+name = "rsmol-render"
+description = "wgpu renderer for rsmol: impostor-based molecular representations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rsmol-core.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.34"
+wgpu = "30"
