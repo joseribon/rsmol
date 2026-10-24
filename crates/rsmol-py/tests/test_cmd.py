@@ -86,6 +86,23 @@ class CmdTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cmd.save(os.path.join(tmp, "out.xyz"))
 
+    def test_do_understands_file_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdb = os.path.join(tmp, "x.pdb")
+            message = cmd.do(f"save {pdb}, polymer.protein; load {pdb}, copy; select copy")
+            self.assertIn("loaded", message)
+            self.assertEqual(cmd.get_names(), ["traces", "copy"])
+            self.assertEqual(cmd.count_atoms("sele"), 20)
+            png = os.path.join(tmp, "x.png")
+            cmd.do(f"png {png}, 200, 120")
+            self.assertTrue(os.path.getsize(png) > 0)
+        with self.assertRaises(ValueError):
+            cmd.do("fetch")
+        # Lines without file commands still go to the core in one call (one undo step).
+        cmd.do("color coral; color teal, chain A")
+        cmd.undo()
+        self.assertNotEqual(cmd.get_atoms("index 1")[0], None)
+
     def test_png_and_session_round_trip(self):
         cmd.show_as("sticks")
         cmd.color("coral", "chain A")

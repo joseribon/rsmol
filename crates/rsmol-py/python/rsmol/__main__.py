@@ -6,7 +6,7 @@
     rsmol -d "fetch 1hsg; show sticks, organic"
     rsmol -c script.py              no window: run headless and exit (like `pymol -c`)
 
-Structures and sessions load before the window opens; `-d` commands and scripts then run on a
+Structures and sessions load before the window opens; then `-d` commands run, then scripts, on a
 background thread, so their effects appear live. The window closes the program.
 """
 
@@ -73,7 +73,8 @@ def _run_steps(steps: list[tuple[str, str]], quiet: bool) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    steps: list[tuple[str, str]] = []
+    # Setup commands (-d) run before scripts, so a script sees what they loaded.
+    steps: list[tuple[str, str]] = [("commands", line) for line in args.do]
     load_ok = True
     for path in args.files:
         if path.lower().endswith(SCRIPT_EXTENSIONS):
@@ -85,7 +86,6 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, OSError) as e:
             print(f"rsmol: {e}", file=sys.stderr)
             load_ok = False
-    steps += [("commands", line) for line in args.do]
 
     if args.no_window:
         return 0 if _run_steps(steps, args.quiet) and load_ok else 1

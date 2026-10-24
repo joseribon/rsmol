@@ -57,9 +57,47 @@ def reinitialize() -> None:
         _session = _new_session()
 
 
+# Commands that touch files or the network, which the core command language leaves to front ends
+# (the desktop app handles them in its command bar; here they map onto the functions below).
+_FILE_COMMANDS = ("fetch", "load", "save", "png", "run")
+
+
 def do(command: str) -> str:
-    """Runs a command line (several commands may be separated by ';') and returns its message."""
-    return _session.do(command)
+    """Runs a command line (several commands may be separated by ';') and returns its message.
+
+    Besides the core commands (select, show, color, align, …) this understands `fetch <id>`,
+    `load <file>[, name]`, `save <file>[, selection]`, `png <file>[, width, height]` and
+    `run <script.py>`, as the app's command bar does."""
+    parts = [p.strip() for p in command.split(";") if p.strip()]
+    if not any(p.split(maxsplit=1)[0].lower() in _FILE_COMMANDS for p in parts):
+        # One call keeps a multi-command line a single undo step.
+        return _session.do(command)
+    return "\n".join(m for m in (_do_one(p) for p in parts) if m)
+
+
+def _do_one(part: str) -> str:
+    word, _, rest = part.partition(" ")
+    args = [a.strip() for a in rest.split(",")] if rest.strip() else []
+    verb = word.lower()
+    if verb not in _FILE_COMMANDS:
+        return _session.do(part)
+    if not args:
+        raise ValueError(f"{verb} needs a {'PDB ID' if verb == 'fetch' else 'file name'}")
+    if verb == "fetch":
+        return f"fetched {fetch(args[0], args[1] if len(args) > 1 else None)}"
+    if verb == "load":
+        return f"loaded {args[0]} as {load(args[0], args[1] if len(args) > 1 else None)}"
+    if verb == "save":
+        save(args[0], args[1] if len(args) > 1 else "all")
+        return f"saved {args[0]}"
+    if verb == "png":
+        size = [int(a) for a in args[1:3]]
+        png(args[0], *size)
+        return f"wrote {args[0]}"
+    import runpy
+
+    runpy.run_path(os.path.expanduser(args[0]), run_name="__main__")
+    return f"ran {args[0]}"
 
 
 def _run(command: str) -> dict[str, Any]:

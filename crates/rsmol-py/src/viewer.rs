@@ -9,15 +9,15 @@
 //! presets, R resets the view, Esc clears the selection.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use glam::Quat;
 use rsmol_core::session::PRESETS;
 use rsmol_render::{Camera, Renderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -25,6 +25,14 @@ use crate::{Shared, ViewRequest, apply_camera_state, camera_state, default_rotat
 
 /// Pointer travel (physical pixels) under which a press and release count as a click.
 const CLICK_SLOP: f64 = 4.0;
+/// `RSMOL_DEBUG=1` logs frame and window events to stderr, for diagnosing blank windows.
+fn debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RSMOL_DEBUG").is_some_and(|v| v != "0"))
+}
+
+/// How soon to retry a frame the window system would not show.
+const RETRY: Duration = Duration::from_millis(16);
 
 pub fn run(shared: Arc<Shared>, title: &str) -> Result<(), String> {
     let event_loop = EventLoop::<()>::with_user_event().build().map_err(|e| format!("cannot open a window: {e}"))?;
@@ -67,12 +75,17 @@ struct Gfx {
     modifiers: ModifiersState,
     hover_title: String,
     last_frame: Instant,
+    /// The last frame could not be shown (macOS reports a new window as occluded until it is
+    /// on screen); it is retried on a short timer instead of waiting for the next event.
+    retry: bool,
 }
 
 impl Viewer {
     fn setup(&mut self, event_loop: &ActiveEventLoop) -> Result<Gfx, String> {
         let attrs = Window::default_attributes().with_title(&self.title).with_inner_size(LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(event_loop.create_window(attrs).map_err(|e| e.to_string())?);
+        // Started from a terminal, the window can open behind it; ask to come to the front.
+        window.focus_window();
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(event_loop.owned_display_handle())));
         let surface = instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
@@ -84,6 +97,10 @@ impl Viewer {
         }))
         .map_err(|e| format!("no GPU adapter for the window: {e}"))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).map_err(|e| e.to_string())?;
+        if debug() {
+            let info = adapter.get_info();
+            eprintln!("rsmol: GPU {} ({:?})", info.name, info.backend);
+        }
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -112,6 +129,7 @@ impl Viewer {
             modifiers: ModifiersState::empty(),
             hover_title: String::new(),
             last_frame: Instant::now(),
+            retry: false,
         })
     }
 }
@@ -126,6 +144,9 @@ impl Gfx {
         let mut state = shared.lock();
         if self.version == Some(state.version) {
             return;
+        }
+        if debug() {
+            eprintln!("rsmol: scene version {} ({} atoms)", state.version, state.core.structure.as_ref().map_or(0, |s| s.atom_count()));
         }
         let first = self.version.is_none();
         self.version = Some(state.version);
@@ -182,8 +203,22 @@ impl Gfx {
                 self.window.request_redraw();
                 return;
             }
-            _ => return,
+            other => {
+                if debug() && !self.retry {
+                    eprintln!("rsmol: frame not shown ({}), retrying", match other {
+                        wgpu::CurrentSurfaceTexture::Occluded => "window occluded",
+                        wgpu::CurrentSurfaceTexture::Timeout => "timeout",
+                        _ => "surface error",
+                    });
+                }
+                self.retry = true;
+                return;
+            }
         };
+        if debug() && (self.retry || self.version == Some(0) || self.version.is_none()) {
+            eprintln!("rsmol: frame presented ({}x{}, scene version {:?})", self.config.width, self.config.height, self.version);
+        }
+        self.retry = false;
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.renderer.render(&self.queue, &mut encoder, &view, &self.camera);
@@ -251,6 +286,20 @@ impl ApplicationHandler for Viewer {
         }
     }
 
+    fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
+        if let (StartCause::ResumeTimeReached { .. }, Some(g)) = (cause, &self.gfx)
+            && g.retry
+        {
+            g.window.request_redraw();
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Sleep until the next event, unless a dropped frame needs another try.
+        let retry = self.gfx.as_ref().is_some_and(|g| g.retry);
+        event_loop.set_control_flow(if retry { ControlFlow::WaitUntil(Instant::now() + RETRY) } else { ControlFlow::Wait });
+    }
+
     fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
         if self.shared.quit.swap(false, std::sync::atomic::Ordering::SeqCst) {
             event_loop.exit();
@@ -265,6 +314,7 @@ impl ApplicationHandler for Viewer {
         let Some(g) = &mut self.gfx else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Occluded(false) => g.window.request_redraw(),
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 g.config.width = size.width;
                 g.config.height = size.height;
