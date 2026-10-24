@@ -1,0 +1,83 @@
+# Builds the `rsmol` Python package (crates/rsmol-py) for every major platform. Wheels are abi3,
+# so one per platform serves CPython 3.10 and newer.
+#
+# Publishing runs only for version tags (v*) and uses PyPI trusted publishing: no API token is
+# stored. Before the first release, add this repository and workflow as a trusted publisher for
+# the `rsmol` project on pypi.org, and create a GitHub environment named `pypi`.
+name: Python wheels
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: wheel ${{ matrix.target }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { os: ubuntu-latest, target: aarch64, manylinux: auto }
+          - { os: macos-latest, target: aarch64 }
+          - { os: macos-latest, target: x86_64 }
+          - { os: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/rsmol-py
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist
+      # Native-architecture wheels are installed and imported as a smoke test (cross-built
+      # ones cannot run on the runner).
+      - name: Import test
+        if: matrix.target == 'x86_64' && runner.os == 'Linux' || matrix.target == 'aarch64' && runner.os == 'macOS' || runner.os == 'Windows'
+        shell: bash
+        run: |
+          python -m pip install --no-index --find-links crates/rsmol-py/dist rsmol
+          python -c "from rsmol import cmd; print('rsmol', __import__('rsmol').__version__)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: crates/rsmol-py/dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/rsmol-py
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: crates/rsmol-py/dist
+
+  publish:
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@v1.14.3

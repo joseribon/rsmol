@@ -22,3 +22,5 @@ numpy = ["numpy"]
 [tool.maturin]
 python-source = "python"
 module-name = "rsmol._native"
+# Bytecode caches from local test runs do not belong in distributions.
+exclude = ["python/rsmol/__pycache__/**"]
