@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 rsmol-core = { path = "crates/rsmol-core" }
+rsmol-render = { path = "crates/rsmol-render" }
 
 [profile.dev.package."*"]
 # Dependencies (wgpu, parsers) are painfully slow unoptimized; our own code stays debuggable.

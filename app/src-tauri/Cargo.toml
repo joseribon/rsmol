@@ -1,0 +1,30 @@
+[package]
+name = "rsmol-app"
+description = "rsmol desktop app: native wgpu viewport under a transparent webview UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rsmol-core.workspace = true
+rsmol-render.workspace = true
+pollster = "1"
+serde = { version = "1", features = ["derive"] }
+# macos-private-api is required for transparent windows on macOS.
+tauri = { version = "2", features = ["macos-private-api"] }
+wgpu = "30"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Same versions as wry, so the AppKit bindings are shared rather than duplicated.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSGraphics", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }
+raw-window-handle = "0.6"
+
+[features]
+# Embeds the built frontend instead of loading the dev server. `tauri build` enables it;
+# for a plain cargo build use `--features custom-protocol`.
+custom-protocol = ["tauri/custom-protocol"]

@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 rsmol-core.workspace = true
-rsmol-render = { path = "../rsmol-render" }
+rsmol-render.workspace = true
 glam = "0.34"
 png = "0.18"
 pollster = "1"
