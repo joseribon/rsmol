@@ -5,6 +5,7 @@
 
 mod element;
 pub mod io;
+pub mod select;
 mod structure;
 
 pub use element::Element;
