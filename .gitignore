@@ -3,3 +3,6 @@ node_modules/
 dist/
 .DS_Store
 app/src-tauri/gen/
+__pycache__/
+*.so
+.venv/

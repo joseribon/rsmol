@@ -122,6 +122,8 @@ pub struct Outcome {
     pub atoms: Option<usize>,
     /// Empty for dry runs.
     pub effects: Vec<Effect>,
+    /// Numbers a command produced, for scripting (e.g. `rmsd` from align, `value` from distance).
+    pub values: Vec<(&'static str, f64)>,
 }
 
 enum Color {
@@ -461,6 +463,18 @@ impl Session {
         self.remeasure();
     }
 
+    /// Evaluates a selection against the scene, with named selections, objects and `visible`.
+    pub fn select_atoms(&self, text: &str) -> Result<AtomSet, SelectionError> {
+        let structure = self.structure.as_ref().ok_or_else(|| error(0..text.len(), "no structure loaded"))?;
+        let expr = parse(text)?;
+        let visible = self.render_display().as_ref().map(Display::visible);
+        let mut ev = Evaluator::new(structure, 0).with_named(&self.named).with_objects(self.object_ranges());
+        if let Some(v) = &visible {
+            ev = ev.with_visible(v);
+        }
+        ev.eval(&expr).map_err(|e| e.into_selection_error(text))
+    }
+
     /// Pushes `before` as an undo step if anything changed since.
     fn record(&mut self, before: Snapshot) {
         if before != self.snapshot() {
@@ -523,7 +537,7 @@ impl Session {
             if undo { self.redo.push(current) } else { self.undo.push(current) }
             self.restore(target)
         };
-        Ok(Outcome { message, canonical: None, atoms: None, effects })
+        Ok(Outcome { message, canonical: None, atoms: None, effects, values: Vec::new() })
     }
 
     /// Runs one line, which may hold several `;`-separated commands. A dry run reports what the
@@ -575,7 +589,7 @@ impl Session {
                 self.named.remove(DEFAULT_SELECTION);
                 vec![Effect::Highlight(Vec::new())]
             };
-            return Ok(Outcome { message: "clear the selection".into(), canonical: None, atoms: None, effects });
+            return Ok(Outcome { message: "clear the selection".into(), canonical: None, atoms: None, effects, values: Vec::new() });
         }
 
         let structure = self
@@ -603,6 +617,7 @@ impl Session {
             None => format!("{verb} everything"),
         };
 
+        let mut values = Vec::new();
         let (message, canonical, set, effects) = match command {
             Command::Select { name, sel } => {
                 let (set, canonical) = evaluate(Some(sel))?;
@@ -668,6 +683,7 @@ impl Session {
                 let m = Measurement::new(name, kind, atoms, coords);
                 let labels: Vec<String> = m.atoms.iter().map(|&i| structure.atom_label(i)).collect();
                 let message = format!("{}: {} ({})", m.name, m.label(), labels.join(" – "));
+                values.push(("value", m.value as f64));
                 let set = AtomSet::from_indices(n, m.atoms.iter().copied());
                 let effects = if dry_run {
                     Vec::new()
@@ -707,6 +723,12 @@ impl Session {
                     error(offset..offset + text.len(), "fewer than 3 residues could be paired between the selections")
                 })?;
                 let name = self.objects[k].name.clone();
+                values.extend([
+                    ("rmsd", result.rmsd as f64),
+                    ("aligned", result.aligned as f64),
+                    ("paired", result.paired as f64),
+                    ("cycles", result.cycles as f64),
+                ]);
                 let message = format!(
                     "{name}: RMSD = {:.3} Å over {} residues ({} paired, {} cycles)",
                     result.rmsd, result.aligned, result.paired, result.cycles
@@ -742,7 +764,7 @@ impl Session {
             }
             Command::Deselect | Command::Delete { .. } => unreachable!("handled above"),
         };
-        Ok(Outcome { message, canonical, atoms: Some(set.count()), effects })
+        Ok(Outcome { message, canonical, atoms: Some(set.count()), effects, values })
     }
 
     /// PyMOL-style automatic names: dist01, dist02, …, skipping names already in use.
@@ -754,7 +776,7 @@ impl Session {
     }
 
     fn delete(&mut self, name: Arg, dry_run: bool) -> Result<Outcome, SelectionError> {
-        let outcome = |message: String, effects| Outcome { message, canonical: None, atoms: None, effects };
+        let outcome = |message: String, effects| Outcome { message, canonical: None, atoms: None, effects, values: Vec::new() };
         if name.text.eq_ignore_ascii_case("all") {
             let message = format!(
                 "delete {} objects, {} measurements and {} selections",

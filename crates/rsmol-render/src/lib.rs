@@ -10,6 +10,7 @@
 pub mod atoms;
 mod camera;
 pub mod cartoon;
+pub mod offscreen;
 pub mod style;
 
 use std::borrow::Cow;

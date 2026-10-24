@@ -1,0 +1,22 @@
+[package]
+name = "rsmol-py"
+description = "Python bindings for rsmol: a headless, PyMOL-style cmd API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+rsmol-core.workspace = true
+rsmol-render.workspace = true
+glam = "0.34"
+png = "0.18"
+# One wheel for every CPython from 3.10 on.
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[build-dependencies]
+pyo3-build-config = "0.30"
