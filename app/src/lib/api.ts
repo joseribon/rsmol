@@ -33,12 +33,25 @@ export interface SelectionSummary {
   residues: number;
 }
 
+export interface MeasurementSummary {
+  name: string;
+  label: string;
+}
+
+/** A measurement label at a physical pixel position, or null when off screen. */
+export interface Label {
+  name: string;
+  text: string;
+  position: [number, number] | null;
+}
+
 export interface CommandResult {
   message: string;
   canonical: string | null;
   atoms: number | null;
   /** The "sele" selection after the command. */
   selection: SelectionSummary | null;
+  measurements: MeasurementSummary[];
 }
 
 export interface PickInfo {

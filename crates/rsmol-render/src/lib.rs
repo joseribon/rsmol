@@ -133,6 +133,7 @@ pub struct Renderer {
     /// does not recompute the density grid.
     surface_cache: Option<(SurfaceKey, SurfaceMesh)>,
     markers: Option<Instances>,
+    dashes: Option<Instances>,
     targets: Targets,
     pub style: Style,
 }
@@ -318,6 +319,7 @@ impl Renderer {
             surface: None,
             surface_cache: None,
             markers: None,
+            dashes: None,
             targets,
             style: Style::default(),
         }
@@ -382,6 +384,31 @@ impl Renderer {
         self.markers = upload(device, "selection markers", &markers);
     }
 
+    /// Dashed lines for measurements; an empty slice clears them.
+    pub fn set_measurements(&mut self, device: &wgpu::Device, segments: &[(Vec3, Vec3)]) {
+        let mut dashes = Vec::new();
+        for &(a, b) in segments {
+            let (a, b) = (glam::Vec3::from(a), glam::Vec3::from(b));
+            let length = a.distance(b);
+            let dir = (b - a) / length.max(1e-6);
+            let mut t = 0.0;
+            while t < length {
+                let end = (t + style::DASH_ON).min(length);
+                dashes.push(StickInstance {
+                    a: (a + dir * t).into(),
+                    b: (a + dir * end).into(),
+                    radius: style::DASH_RADIUS,
+                    color_a: style::MEASUREMENT,
+                    color_b: style::MEASUREMENT,
+                    id_a: 0,
+                    id_b: 0,
+                });
+                t += style::DASH_ON + style::DASH_OFF;
+            }
+        }
+        self.dashes = upload(device, "measurement dashes", &dashes);
+    }
+
     pub fn render(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, camera: &Camera) {
         let (width, height) = self.targets.size;
         let proj = camera.proj(width as f32 / height as f32);
@@ -443,7 +470,7 @@ impl Renderer {
                 pass.set_vertex_buffer(0, spheres.buffer.slice(..));
                 pass.draw(0..4, 0..spheres.count);
             }
-            if let Some(sticks) = &self.sticks {
+            for sticks in [&self.sticks, &self.dashes].into_iter().flatten() {
                 pass.set_pipeline(&self.stick_pipeline);
                 pass.set_vertex_buffer(0, sticks.buffer.slice(..));
                 pass.draw(0..4, 0..sticks.count);

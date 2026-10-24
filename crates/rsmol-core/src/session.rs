@@ -8,6 +8,10 @@
 //!   as <rep> [, <selection>]         show only that representation
 //!   color <color> [, <selection>]    a name or #rrggbb, or a scheme: bychain, byelement,
 //!                                    byss, bfactor, default
+//!   distance [<name>,] <a>, <b>      measure between two single-atom selections
+//!   angle [<name>,] <a>, <b>, <c>    angle at <b>
+//!   dihedral [<name>,] <a>, …, <d>   torsion about <b>–<c>
+//!   delete <name>|all                remove a measurement or named selection
 //!   <selection>                      same as `select <selection>`
 //!
 //! Commands separated by `;` run in order. Every line can be dry-run, which evaluates without
@@ -19,6 +23,7 @@ use std::sync::Arc;
 
 use crate::color::{self, Rgba};
 use crate::display::{self, Display, Reps};
+use crate::measure::{Measurement, MeasurementKind};
 use crate::select::{AtomSet, Evaluator, SelectionError, parse};
 use crate::Structure;
 
@@ -38,6 +43,7 @@ pub struct Session {
     pub structure: Option<Arc<Structure>>,
     pub display: Option<Display>,
     pub named: HashMap<String, AtomSet>,
+    pub measurements: Vec<Measurement>,
 }
 
 /// What a front end must update after a command.
@@ -49,6 +55,8 @@ pub enum Effect {
     Focus(Option<Vec<usize>>),
     /// `Session::display` changed.
     Display,
+    /// `Session::measurements` changed.
+    Measurements,
 }
 
 /// What a command did (or, for a dry run, would do).
@@ -79,6 +87,8 @@ enum Command<'a> {
     Hide { reps: Reps, sel: Option<Arg<'a>> },
     As { reps: Reps, sel: Option<Arg<'a>> },
     Color { color: Color, sel: Option<Arg<'a>> },
+    Measure { kind: MeasurementKind, name: Option<Arg<'a>>, sels: Vec<Arg<'a>> },
+    Delete { name: Arg<'a> },
 }
 
 /// A selection argument and its byte offset in the full command line.
@@ -106,6 +116,24 @@ fn split_comma(args: Arg<'_>) -> (Arg<'_>, Option<Arg<'_>>) {
         ),
         None => (args, None),
     }
+}
+
+/// Splits on every comma.
+fn split_commas(args: Arg<'_>) -> Vec<Arg<'_>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, c) in args.text.char_indices().chain(std::iter::once((args.text.len(), ','))) {
+        if c == ',' {
+            out.push(trimmed(&args.text[start..i], args.offset + start));
+            start = i + 1;
+        }
+    }
+    out
+}
+
+fn valid_name(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn span(arg: Arg) -> Range<usize> {
@@ -136,9 +164,7 @@ fn parse_command(text: &str, offset: usize) -> Result<Command<'_>, SelectionErro
             }
             match split_comma(args) {
                 (name, Some(sel)) => {
-                    let valid = name.text.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                        && name.text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-                    if !valid {
+                    if !valid_name(name.text) {
                         return Err(error(span(name), "selection names use letters, digits and _"));
                     }
                     Command::Select { name: name.text, sel }
@@ -179,6 +205,36 @@ fn parse_command(text: &str, offset: usize) -> Result<Command<'_>, SelectionErro
             };
             Command::Color { color, sel }
         }
+        kw @ ("distance" | "dist" | "angle" | "dihedral" | "dihe") => {
+            let kind = match kw {
+                "distance" | "dist" => MeasurementKind::Distance,
+                "angle" => MeasurementKind::Angle,
+                _ => MeasurementKind::Dihedral,
+            };
+            let n = kind.arity();
+            let mut parts = if args.text.is_empty() { Vec::new() } else { split_commas(args) };
+            let name = match parts.len() {
+                k if k == n => None,
+                k if k == n + 1 => Some(parts.remove(0)),
+                _ => {
+                    let what = format!("{kw} takes [name,] then {n} single-atom selections separated by commas");
+                    return Err(error(if args.text.is_empty() { end..end } else { span(args) }, what));
+                }
+            };
+            if let Some(name) = name.filter(|a| !valid_name(a.text)) {
+                return Err(error(span(name), "measurement names use letters, digits and _"));
+            }
+            if let Some(empty) = parts.iter().find(|a| a.text.is_empty()) {
+                return Err(error(empty.offset..empty.offset, "expected a selection"));
+            }
+            Command::Measure { kind, name, sels: parts }
+        }
+        "delete" => {
+            if args.text.is_empty() {
+                return Err(error(end..end, "delete needs a measurement or selection name, or all"));
+            }
+            Command::Delete { name: args }
+        }
         _ => Command::Select { name: DEFAULT_SELECTION, sel: line },
     })
 }
@@ -199,6 +255,7 @@ impl Session {
         self.display = Some(Display::default_for(&structure));
         self.structure = Some(structure);
         self.named.clear();
+        self.measurements.clear();
     }
 
     /// Runs one line, which may hold several `;`-separated commands. A dry run reports what the
@@ -219,6 +276,9 @@ impl Session {
     fn run_one(&mut self, text: &str, offset: usize, dry_run: bool) -> Result<Outcome, SelectionError> {
         // `offset` places `text` in the full line, so every error span is absolute.
         let command = parse_command(text, offset)?;
+        if let Command::Delete { name } = command {
+            return self.delete(name, dry_run);
+        }
         if let Command::Deselect = command {
             let effects = if dry_run {
                 Vec::new()
@@ -301,9 +361,73 @@ impl Session {
                 }
                 (message, canonical, set, if dry_run { Vec::new() } else { vec![Effect::Display] })
             }
-            Command::Deselect => unreachable!("handled above"),
+            Command::Measure { kind, name, sels } => {
+                let mut atoms = Vec::with_capacity(sels.len());
+                for &sel in &sels {
+                    let (set, _) = evaluate(Some(sel))?;
+                    if set.count() != 1 {
+                        return Err(error(span(sel), format!("expected exactly one atom, got {}", set.count())));
+                    }
+                    atoms.push(set.first().unwrap());
+                }
+                let name = match name {
+                    Some(n) => n.text.to_owned(),
+                    None => self.next_measurement_name(kind),
+                };
+                let coords = structure.coords(0).unwrap_or_default();
+                let m = Measurement::new(name, kind, atoms, coords);
+                let labels: Vec<String> = m.atoms.iter().map(|&i| structure.atom_label(i)).collect();
+                let message = format!("{}: {} ({})", m.name, m.label(), labels.join(" – "));
+                let set = AtomSet::from_indices(n, m.atoms.iter().copied());
+                let effects = if dry_run {
+                    Vec::new()
+                } else {
+                    self.measurements.retain(|x| x.name != m.name);
+                    self.measurements.push(m);
+                    vec![Effect::Measurements]
+                };
+                (message, None, set, effects)
+            }
+            Command::Deselect | Command::Delete { .. } => unreachable!("handled above"),
         };
         Ok(Outcome { message, canonical, atoms: Some(set.count()), effects })
+    }
+
+    /// PyMOL-style automatic names: dist01, dist02, …, skipping names already in use.
+    fn next_measurement_name(&self, kind: MeasurementKind) -> String {
+        (1..)
+            .map(|k| format!("{}{k:02}", kind.prefix()))
+            .find(|name| self.measurements.iter().all(|m| &m.name != name))
+            .unwrap()
+    }
+
+    fn delete(&mut self, name: Arg, dry_run: bool) -> Result<Outcome, SelectionError> {
+        let outcome = |message: String, effects| Outcome { message, canonical: None, atoms: None, effects };
+        if name.text.eq_ignore_ascii_case("all") {
+            let message = format!("delete {} measurements and {} selections", self.measurements.len(), self.named.len());
+            if dry_run {
+                return Ok(outcome(message, Vec::new()));
+            }
+            self.measurements.clear();
+            self.named.clear();
+            return Ok(outcome(message, vec![Effect::Measurements, Effect::Highlight(Vec::new())]));
+        }
+        let is_measurement = self.measurements.iter().any(|m| m.name == name.text);
+        if !is_measurement && !self.named.contains_key(name.text) {
+            return Err(error(span(name), format!("no measurement or selection named '{}'", name.text)));
+        }
+        let message = format!("delete {}", name.text);
+        if dry_run {
+            return Ok(outcome(message, Vec::new()));
+        }
+        let effects = if is_measurement {
+            self.measurements.retain(|m| m.name != name.text);
+            vec![Effect::Measurements]
+        } else {
+            self.named.remove(name.text);
+            if name.text == DEFAULT_SELECTION { vec![Effect::Highlight(Vec::new())] } else { Vec::new() }
+        };
+        Ok(outcome(message, effects))
     }
 
     fn apply_color(&mut self, s: &Structure, color: Color, set: &AtomSet) {
@@ -429,6 +553,36 @@ HETATM    7 ZN    ZN A 101       9.000   0.000   0.000  1.00  0.00          ZN
         assert_eq!(s.run(text, true).unwrap_err().message, "unknown color 'chartreuse'");
         assert_eq!(s.run("zoom resn XYZ", true).unwrap_err().message, "selection is empty");
         assert_eq!(s.run("select 1x, all", true).unwrap_err().message, "selection names use letters, digits and _");
+    }
+
+    #[test]
+    fn measurements() {
+        let mut s = session();
+        let out = s.run("distance index 2, index 5", false).unwrap();
+        assert_eq!(out.message, "dist01: 3.80 Å (A/ALA 1/CA – A/ALA 2/CA)");
+        assert_eq!(out.effects, [Effect::Measurements]);
+        s.run("angle bb, index 1, index 2, index 3", false).unwrap();
+        s.run("distance index 1, index 3", false).unwrap();
+        let names: Vec<_> = s.measurements.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["dist01", "bb", "dist02"]);
+        // Re-using a name replaces the measurement.
+        s.run("distance bb, index 1, index 2", false).unwrap();
+        assert_eq!(s.measurements.len(), 3);
+        s.run("delete dist01", false).unwrap();
+        assert_eq!(s.measurements.len(), 2);
+        s.run("delete all", false).unwrap();
+        assert!(s.measurements.is_empty());
+    }
+
+    #[test]
+    fn measurement_errors() {
+        let mut s = session();
+        let text = "distance name CA, index 1";
+        let err = s.run(text, true).unwrap_err();
+        assert_eq!(&text[err.span.clone()], "name CA");
+        assert_eq!(err.message, "expected exactly one atom, got 2");
+        assert!(s.run("angle index 1, index 2", true).unwrap_err().message.starts_with("angle takes [name,] then 3"));
+        assert_eq!(s.run("delete nope", true).unwrap_err().message, "no measurement or selection named 'nope'");
     }
 
     #[test]

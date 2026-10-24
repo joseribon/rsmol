@@ -3,12 +3,13 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { presets, startupFile, type FrameStats, type Preset } from "./lib/api";
-  import { consoleState, execute, openFile, recentLabel, reopen } from "./lib/console.svelte";
+  import { consoleState, execute, openFile, recentLabel, reopen, toggleMeasuring } from "./lib/console.svelte";
   import { SCHEMES } from "./lib/palette";
   import Viewport from "./lib/Viewport.svelte";
   import CommandBar from "./lib/CommandBar.svelte";
   import SelectionCard from "./lib/SelectionCard.svelte";
   import AtomTooltip from "./lib/AtomTooltip.svelte";
+  import MeasurementLabels from "./lib/MeasurementLabels.svelte";
 
   const info = $derived(consoleState.structure);
   let stats: FrameStats | null = $state(null);
@@ -33,6 +34,13 @@
     if (outcome?.ok) activeLook = index;
   }
 
+  // M toggles the measure tool and Escape leaves it, unless focus is in a text field.
+  function onkeydown(e: KeyboardEvent) {
+    if (e.target instanceof HTMLInputElement || !consoleState.structure) return;
+    if (e.key === "m" || e.key === "M") toggleMeasuring();
+    else if (e.key === "Escape" && consoleState.measuring) consoleState.measuring = null;
+  }
+
   onMount(() => {
     presets().then((p) => (looks = p));
     startupFile().then((path) => {
@@ -52,7 +60,10 @@
   const fmt = (n: number) => n.toLocaleString("en-US");
 </script>
 
+<svelte:window {onkeydown} />
+
 <Viewport />
+<MeasurementLabels />
 <AtomTooltip />
 
 <header class="titlebar" data-tauri-drag-region>
@@ -61,6 +72,32 @@
 </header>
 
 {#if info}
+  <div class="tools">
+    <button
+      class="tool panel"
+      class:active={consoleState.measuring !== null}
+      aria-pressed={consoleState.measuring !== null}
+      title="Measure distances between atoms (M)"
+      onclick={toggleMeasuring}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M2.5 11 11 2.5l2.5 2.5L5 13.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+        <path d="M5 8.5l1.2 1.2M7 6.5l1.2 1.2M9 4.5l1.2 1.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+      </svg>
+      Measure
+    </button>
+  </div>
+  {#if consoleState.measuring}
+    <div class="measure-hint panel" role="status">
+      {#if consoleState.measuring.length === 0}
+        Click an atom to start a distance
+      {:else}
+        <span class="mono">{consoleState.measuring[0].label}</span> → click a second atom
+      {/if}
+      <span class="faint">· Esc to finish</span>
+    </div>
+  {/if}
+
   <aside class="info panel">
     <h2>{info.name}</h2>
     <dl>
@@ -91,6 +128,19 @@
         </button>
       {/each}
     </div>
+
+    {#if consoleState.measurements.length}
+      <h3>Measurements</h3>
+      <ul class="measurements">
+        {#each consoleState.measurements as m (m.name)}
+          <li>
+            <span class="mono name">{m.name}</span>
+            <span class="mono value">{m.label}</span>
+            <button title={`delete ${m.name}`} aria-label={`Delete ${m.name}`} onclick={() => execute(`delete ${m.name}`)}>×</button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
 
     <h3>Chains</h3>
     <div class="chains">
@@ -265,6 +315,73 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+  }
+  .measurements {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .measurements li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .measurements .name {
+    color: var(--text-muted);
+  }
+  .measurements .value {
+    margin-left: auto;
+    color: #f5c454;
+  }
+  .measurements button {
+    border: none;
+    background: none;
+    color: var(--text-faint);
+    font-size: 14px;
+    padding: 0 2px;
+  }
+  .measurements button:hover {
+    color: var(--danger);
+  }
+
+  .tools {
+    position: absolute;
+    top: 48px;
+    right: 12px;
+    display: flex;
+    gap: 6px;
+  }
+  .tool {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .tool:hover {
+    color: var(--text);
+  }
+  .tool.active {
+    color: #1a1406;
+    background: rgba(245, 196, 84, 0.92);
+    border-color: transparent;
+  }
+  .measure-hint {
+    position: absolute;
+    top: 48px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 12px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .faint {
+    color: var(--text-faint);
   }
   .chip {
     font-size: 11px;

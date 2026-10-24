@@ -93,7 +93,7 @@ impl ViewState {
             match effect {
                 Effect::Highlight(atoms) => self.highlight = atoms,
                 Effect::Focus(atoms) => self.focus = atoms,
-                Effect::Display => {}
+                Effect::Display | Effect::Measurements => {}
             }
         }
     }
@@ -121,7 +121,10 @@ fn fitted_camera(session: &Session, view: &ViewState, width: u32, height: u32) -
 fn sync_renderer(renderer: &mut Renderer, device: &wgpu::Device, session: &Session, view: &ViewState) {
     let s = structure(session);
     renderer.set_scene(device, s, session.display.as_ref().unwrap(), 0);
-    renderer.set_highlight(device, s.coords(0).unwrap_or_default(), view.highlight.iter().copied());
+    let coords = s.coords(0).unwrap_or_default();
+    renderer.set_highlight(device, coords, view.highlight.iter().copied());
+    let segments: Vec<_> = session.measurements.iter().flat_map(|m| m.segments(coords)).collect();
+    renderer.set_measurements(device, &segments);
 }
 
 fn adapter_options<'a>(surface: Option<&'a wgpu::Surface<'a>>) -> wgpu::RequestAdapterOptions<'a, 'a> {
@@ -337,6 +340,10 @@ async fn screenshot(session: &Session, view: &ViewState, out: &str, width: u32, 
     sync_renderer(&mut renderer, &device, session, view);
     println!("built geometry in {:.1?}", t.elapsed());
     let mut camera = fitted_camera(session, view, width, height);
+    for m in &session.measurements {
+        let at = camera.project(m.anchor(structure(session).coords(0).unwrap()), width as f32, height as f32);
+        println!("label {} {} at {at:?}", m.name, m.label());
+    }
 
     let row_bytes = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {

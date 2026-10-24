@@ -7,6 +7,7 @@ import {
   runCommand,
   type CommandResult,
   type SelectionError,
+  type MeasurementSummary,
   type PickInfo,
   type SelectionSummary,
   type StructureInfo,
@@ -31,7 +32,26 @@ export const consoleState = $state({
   recent: readRecent(),
   /** The atom under the pointer and where to show its tooltip (CSS pixels). */
   hover: null as { info: PickInfo; x: number; y: number } | null,
+  measurements: [] as MeasurementSummary[],
+  /** Measure tool: atoms picked so far, or null when the tool is off. */
+  measuring: null as PickInfo[] | null,
 });
+
+/** Turns the measure tool on or off. */
+export function toggleMeasuring() {
+  consoleState.measuring = consoleState.measuring ? null : [];
+}
+
+/** Adds a picked atom; every second atom completes a distance. */
+export async function measurePick(info: PickInfo) {
+  const picked = [...(consoleState.measuring ?? []), info];
+  if (picked.length < 2) {
+    consoleState.measuring = picked;
+    return;
+  }
+  consoleState.measuring = [];
+  await execute(`distance index ${picked[0].index}, index ${picked[1].index}`);
+}
 
 const HISTORY_LIMIT = 5;
 const RECENT_KEY = "rsmol.recent";
@@ -47,7 +67,7 @@ export async function execute(input: string, { dryRun = false, logErrors = true 
     // Downloading happens in the app, not the core session, so `fetch` is handled here.
     const id = fetchMatch[1].toUpperCase();
     outcome = dryRun
-      ? { ok: true, value: { message: `fetch ${id} from the RCSB PDB`, canonical: null, atoms: null, selection: null } }
+      ? { ok: true, value: { message: `fetch ${id} from the RCSB PDB`, canonical: null, atoms: null, selection: null, measurements: [] } }
       : await fetchEntry(id);
   } else {
     try {
@@ -59,6 +79,7 @@ export async function execute(input: string, { dryRun = false, logErrors = true 
   if (dryRun) return outcome;
   if (outcome.ok) {
     consoleState.selection = outcome.value.selection;
+    consoleState.measurements = outcome.value.measurements;
     log({ input, output: outcome.value.message, ok: true });
   } else if (logErrors) {
     log({ input, output: outcome.error.message, ok: false });
@@ -81,7 +102,7 @@ async function fetchEntry(id: string): Promise<Outcome> {
   }
   remember({ kind: "fetch", id });
   const message = `${info.name}: ${info.atoms.toLocaleString("en-US")} atoms in ${info.parse_ms.toFixed(0)} ms`;
-  return { ok: true, value: { message, canonical: null, atoms: info.atoms, selection: null } };
+  return { ok: true, value: { message, canonical: null, atoms: info.atoms, selection: null, measurements: [] } };
 }
 
 export function reopen(r: Recent) {
@@ -97,6 +118,8 @@ async function loading(load: () => Promise<StructureInfo>): Promise<StructureInf
     const info = await load();
     consoleState.structure = info;
     consoleState.selection = null;
+    consoleState.measurements = [];
+    if (consoleState.measuring) consoleState.measuring = [];
     return info;
   } catch (e) {
     consoleState.error = String(e);

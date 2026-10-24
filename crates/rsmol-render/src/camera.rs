@@ -94,6 +94,20 @@ impl Camera {
         (to_center - self.scene_radius * 0.2, to_center + self.scene_radius)
     }
 
+    /// Pixel position of world point `p` in a `width`×`height` viewport (origin top-left), or
+    /// `None` when it is behind the camera or outside the clip volume.
+    pub fn project(&self, p: [f32; 3], width: f32, height: f32) -> Option<[f32; 2]> {
+        let clip = self.proj(width / height.max(1.0)) * self.view() * Vec3::from(p).extend(1.0);
+        if clip.w <= 0.0 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        if ndc.x.abs() > 1.0 || ndc.y.abs() > 1.0 || !(0.0..=1.0).contains(&ndc.z) {
+            return None;
+        }
+        Some([(ndc.x + 1.0) * 0.5 * width, (1.0 - ndc.y) * 0.5 * height])
+    }
+
     pub fn view(&self) -> Mat4 {
         look_at_mat4(self.eye(), self.target, self.rotation * Vec3::Y)
     }

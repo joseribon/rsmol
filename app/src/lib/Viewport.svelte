@@ -3,7 +3,7 @@
   // batched per animation frame); hovering shows the atom under the pointer; clicks select.
   import { onMount } from "svelte";
   import { camera, pick } from "./api";
-  import { consoleState, execute } from "./console.svelte";
+  import { consoleState, execute, measurePick } from "./console.svelte";
 
   let el: HTMLDivElement;
   let mode: "orbit" | "pan" | null = $state(null);
@@ -77,12 +77,18 @@
     if (!wasClick) return;
     const info = await pick(e.clientX, e.clientY);
     if (!info) return;
+    if (consoleState.measuring) {
+      measurePick(info);
+      return;
+    }
     // Shift-click extends the selection; a plain click replaces it.
     const residue = `byres index ${info.index}`;
     execute(e.shiftKey && consoleState.selection ? `select sele or ${residue}` : `select ${residue}`);
   }
 
   async function ondblclick(e: MouseEvent) {
+    // Two quick picks while measuring are not a request to zoom.
+    if (consoleState.measuring) return;
     const info = await pick(e.clientX, e.clientY);
     if (info) execute(`zoom byres index ${info.index}`);
     else camera({ kind: "reset" });
@@ -105,6 +111,7 @@
   class="viewport"
   class:dragging={mode !== null}
   class:over-atom={consoleState.hover !== null}
+  class:measuring={consoleState.measuring !== null}
   bind:this={el}
   {onpointerdown}
   {onpointermove}
@@ -128,6 +135,9 @@
   }
   .over-atom {
     cursor: pointer;
+  }
+  .measuring.over-atom {
+    cursor: crosshair;
   }
   .dragging {
     cursor: grabbing;

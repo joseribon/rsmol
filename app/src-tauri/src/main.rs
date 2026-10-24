@@ -188,12 +188,19 @@ struct SelectionSummary {
 }
 
 #[derive(Serialize)]
+struct MeasurementSummary {
+    name: String,
+    label: String,
+}
+
+#[derive(Serialize)]
 struct CommandResult {
     message: String,
     canonical: Option<String>,
     atoms: Option<usize>,
     /// The "sele" selection after the command, for the selection card.
     selection: Option<SelectionSummary>,
+    measurements: Vec<MeasurementSummary>,
 }
 
 /// Runs a command-bar line. With `dry_run`, only reports what it would do, for live feedback.
@@ -215,6 +222,7 @@ fn run_command(
             Effect::Highlight(atoms) => Msg::Highlight(atoms),
             Effect::Focus(atoms) => Msg::Focus(atoms),
             Effect::Display => Msg::Display(session.display.clone().expect("display exists with a structure")),
+            Effect::Measurements => Msg::Measurements(session.measurements.clone()),
         };
         let _ = viewport.send(msg);
     }
@@ -222,7 +230,9 @@ fn run_command(
         atoms: set.count(),
         residues: set.iter().map(|i| s.atoms.residue[i]).collect::<BTreeSet<_>>().len(),
     });
-    Ok(CommandResult { message: outcome.message, canonical: outcome.canonical, atoms: outcome.atoms, selection })
+    let measurements =
+        session.measurements.iter().map(|m| MeasurementSummary { name: m.name.clone(), label: m.label() }).collect();
+    Ok(CommandResult { message: outcome.message, canonical: outcome.canonical, atoms: outcome.atoms, selection, measurements })
 }
 
 /// A structure path passed on the command line, if any.

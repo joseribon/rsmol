@@ -24,3 +24,9 @@ pub fn vdw_radius(e: Element) -> f32 {
 /// Selection markers: PyMOL's familiar pink, drawn as small overlay spheres.
 pub const SELECTION: [u8; 4] = [255, 92, 200, 255];
 pub const MARKER_RADIUS: f32 = 0.3;
+
+/// Measurement dashes: warm amber, thin, 0.35 Å on / 0.25 Å off.
+pub const MEASUREMENT: [u8; 4] = [245, 196, 84, 255];
+pub const DASH_RADIUS: f32 = 0.06;
+pub const DASH_ON: f32 = 0.35;
+pub const DASH_OFF: f32 = 0.25;

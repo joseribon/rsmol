@@ -9,6 +9,7 @@ pub mod color;
 pub mod display;
 mod element;
 pub mod io;
+pub mod measure;
 pub mod select;
 pub mod session;
 pub mod spatial;

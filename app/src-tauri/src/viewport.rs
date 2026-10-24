@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use rsmol_core::Structure;
 use rsmol_core::display::Display;
+use rsmol_core::measure::Measurement;
 use rsmol_render::{Camera, Renderer};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, WebviewWindow};
@@ -38,8 +39,19 @@ pub enum Msg {
     Highlight(Vec<usize>),
     /// Frame these atoms, or the whole structure for `None`.
     Focus(Option<Vec<usize>>),
+    /// Measurements to draw; their labels are reported to the UI after every frame.
+    Measurements(Vec<Measurement>),
     /// Which atom is drawn at this physical pixel; answered from the latest frame.
     Pick { x: u32, y: u32, reply: Sender<Option<usize>> },
+}
+
+/// A measurement label for the UI to draw, at a physical pixel position.
+#[derive(Clone, Serialize)]
+struct Label {
+    name: String,
+    text: String,
+    /// `None` when the anchor is off screen or behind the camera.
+    position: Option<[f32; 2]>,
 }
 
 #[derive(Clone, Serialize)]
@@ -90,6 +102,8 @@ pub fn spawn(window: &WebviewWindow, app: AppHandle) -> Result<Sender<Msg>, Stri
         renderer,
         camera: Camera::default(),
         structure: None,
+        measurements: Vec::new(),
+        labels_shown: false,
         app,
         gpu,
         last_stats: Instant::now() - Duration::from_secs(1),
@@ -112,6 +126,9 @@ struct ViewportState {
     renderer: Renderer,
     camera: Camera,
     structure: Option<Arc<Structure>>,
+    measurements: Vec<Measurement>,
+    /// Whether the UI currently shows labels, so clearing them is reported once.
+    labels_shown: bool,
     app: AppHandle,
     gpu: String,
     last_stats: Instant,
@@ -191,8 +208,16 @@ impl ViewportState {
             Msg::Load(structure, display) => {
                 self.renderer.set_scene(&self.device, &structure, &display, 0);
                 self.renderer.set_highlight(&self.device, &[], []);
+                self.renderer.set_measurements(&self.device, &[]);
+                self.measurements.clear();
                 self.structure = Some(structure);
                 self.fit_camera();
+            }
+            Msg::Measurements(measurements) => {
+                let coords = self.structure.as_ref().and_then(|s| s.coords(0)).unwrap_or_default();
+                let segments: Vec<_> = measurements.iter().flat_map(|m| m.segments(coords)).collect();
+                self.renderer.set_measurements(&self.device, &segments);
+                self.measurements = measurements;
             }
             Msg::Display(display) => {
                 if let Some(structure) = &self.structure {
@@ -223,6 +248,21 @@ impl ViewportState {
         }
     }
 
+    fn emit_labels(&mut self) {
+        if self.measurements.is_empty() && !self.labels_shown {
+            return;
+        }
+        let coords = self.structure.as_ref().and_then(|s| s.coords(0)).unwrap_or_default();
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let labels: Vec<Label> = self
+            .measurements
+            .iter()
+            .map(|m| Label { name: m.name.clone(), text: m.label(), position: self.camera.project(m.anchor(coords), w, h) })
+            .collect();
+        self.labels_shown = !labels.is_empty();
+        let _ = self.app.emit("viewport-labels", labels);
+    }
+
     /// Returns `false` if the frame could not be presented and should be retried.
     fn draw(&mut self) -> bool {
         let start = Instant::now();
@@ -248,6 +288,7 @@ impl ViewportState {
             eprintln!("viewport: first frame presented ({}x{})", self.config.width, self.config.height);
         }
 
+        self.emit_labels();
         if self.last_stats.elapsed() > Duration::from_millis(250) {
             self.last_stats = Instant::now();
             let stats = FrameStats { frame_ms: start.elapsed().as_secs_f64() * 1e3, gpu: self.gpu.clone() };
