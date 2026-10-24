@@ -1,0 +1,8 @@
+[package]
+name = "rsmol-core"
+description = "Molecular data model, file parsers and selection engine for rsmol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

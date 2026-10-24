@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+rsmol-core = { path = "crates/rsmol-core" }
+
+[profile.dev.package."*"]
+# Dependencies (wgpu, parsers) are painfully slow unoptimized; our own code stays debuggable.
+opt-level = 2
