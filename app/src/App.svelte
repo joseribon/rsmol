@@ -10,7 +10,9 @@
     execute,
     openFile,
     recentLabel,
+    refreshState,
     reopen,
+    scriptOutput,
     toggleMeasuring,
   } from "./lib/console.svelte";
   import { SCHEMES } from "./lib/palette";
@@ -79,6 +81,9 @@
     });
     const unlisten = [
       listen<FrameStats>("viewport-frame", (e) => (stats = e.payload)),
+      // Scripts change the session from outside the UI; mirror it as they go.
+      listen("session-changed", () => refreshState()),
+      listen<string>("python-output", (e) => scriptOutput(e.payload)),
       getCurrentWebview().onDragDropEvent((e) => {
         const { type } = e.payload;
         dropping = type === "enter" || type === "over";

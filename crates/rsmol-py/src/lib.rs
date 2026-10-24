@@ -195,31 +195,26 @@ impl Session {
     /// alt, b, q, x, y, z, hetatm.
     #[pyo3(signature = (selection="all"))]
     fn get_atoms<'py>(&self, py: Python<'py>, selection: &str) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let set = self.inner.select_atoms(selection).map_err(|e| value_error(e, selection))?;
-        let s = self.structure()?;
-        let coords = s.coords(0).unwrap_or_default();
-        let objects = self.inner.object_ranges();
-        set.iter()
-            .map(|i| {
-                let r = s.residue_of(i);
+        let atoms = self.inner.atom_info(selection).map_err(|e| value_error(e, selection))?;
+        atoms
+            .into_iter()
+            .map(|a| {
                 let d = PyDict::new(py);
-                d.set_item("index", i + 1)?;
-                let object = objects.iter().find(|(_, range)| range.contains(&i)).map(|(n, _)| n.as_str());
-                d.set_item("object", object)?;
-                d.set_item("chain", &s.chain_of(i).id)?;
-                d.set_item("segi", &s.chain_of(i).label_id)?;
-                d.set_item("resn", &r.name)?;
-                d.set_item("resi", format!("{}{}", r.seq_num, r.ins_code.map(String::from).unwrap_or_default()))?;
-                d.set_item("name", &s.atoms.name[i])?;
-                d.set_item("elem", s.atoms.element[i].symbol())?;
-                d.set_item("alt", s.atoms.alt_loc[i].map(String::from).unwrap_or_default())?;
-                d.set_item("b", s.atoms.b_factor[i])?;
-                d.set_item("q", s.atoms.occupancy[i])?;
-                let [x, y, z] = coords[i];
-                d.set_item("x", x)?;
-                d.set_item("y", y)?;
-                d.set_item("z", z)?;
-                d.set_item("hetatm", s.atoms.hetero[i])?;
+                d.set_item("index", a.index)?;
+                d.set_item("object", a.object)?;
+                d.set_item("chain", a.chain)?;
+                d.set_item("segi", a.segi)?;
+                d.set_item("resn", a.resn)?;
+                d.set_item("resi", a.resi)?;
+                d.set_item("name", a.name)?;
+                d.set_item("elem", a.elem)?;
+                d.set_item("alt", a.alt)?;
+                d.set_item("b", a.b)?;
+                d.set_item("q", a.q)?;
+                d.set_item("x", a.x)?;
+                d.set_item("y", a.y)?;
+                d.set_item("z", a.z)?;
+                d.set_item("hetatm", a.hetatm)?;
                 Ok(d)
             })
             .collect()
@@ -233,14 +228,14 @@ impl Session {
     /// Measurements as dicts: name, kind, value (Å or degrees), atoms (1-based indices).
     fn get_measurements<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         self.inner
-            .measurements
-            .iter()
+            .measurement_info()
+            .into_iter()
             .map(|m| {
                 let d = PyDict::new(py);
-                d.set_item("name", &m.name)?;
-                d.set_item("kind", format!("{:?}", m.kind).to_lowercase())?;
+                d.set_item("name", m.name)?;
+                d.set_item("kind", m.kind)?;
                 d.set_item("value", m.value)?;
-                d.set_item("atoms", m.atoms.iter().map(|a| a + 1).collect::<Vec<_>>())?;
+                d.set_item("atoms", m.atoms)?;
                 Ok(d)
             })
             .collect()

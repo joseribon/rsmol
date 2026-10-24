@@ -3,15 +3,34 @@
 Function names and argument order follow PyMOL's `cmd`, so most scripts port by changing the
 import. Every command goes through rsmol's command language (see `do`), the same one the desktop
 app's command bar uses. Selections use PyMOL syntax.
+
+Run from the rsmol app (`run script.py`), the session is the app's own: the window updates as
+the script runs.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any, NamedTuple
 
-from ._native import Session
 
-_session = Session()
+def _new_session():
+    socket_path = os.environ.get("RSMOL_APP_SOCKET")
+    if socket_path:
+        from ._remote import RemoteSession
+
+        return RemoteSession(socket_path)
+    from ._native import Session
+
+    return Session()
+
+
+_session = _new_session()
+
+
+def in_app() -> bool:
+    """Whether this script is driving the rsmol app (rather than a headless session)."""
+    return "RSMOL_APP_SOCKET" in os.environ
 
 
 class AlignResult(NamedTuple):
@@ -23,15 +42,19 @@ class AlignResult(NamedTuple):
     paired: int
 
 
-def get_session() -> Session:
-    """The session these functions act on."""
+def get_session():
+    """The session these functions act on (a native Session, or the app's)."""
     return _session
 
 
 def reinitialize() -> None:
     """Discards everything: objects, selections, measurements and the view."""
     global _session
-    _session = Session()
+    if in_app():
+        _session.do("delete all")
+        _session.reset()
+    else:
+        _session = _new_session()
 
 
 def do(command: str) -> str:

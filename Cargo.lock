@@ -3434,6 +3434,7 @@ dependencies = [
  "rsmol-core",
  "rsmol-render",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

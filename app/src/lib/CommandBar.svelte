@@ -95,7 +95,7 @@
         {onkeydown}
         spellcheck="false"
         autocomplete="off"
-        placeholder="byres (organic around 5) and polymer   ·   show sticks, sele   ·   color coral, chain A"
+        placeholder="byres (organic around 5) and polymer   ·   show sticks, sele   ·   run script.py"
       />
       {#if result && !result.ok}
         <div class="carets mono" aria-hidden="true">{carets(result.error)}</div>
@@ -117,7 +117,9 @@
       </button>
     {/if}
   </div>
-  {#if result}
+  {#if consoleState.running !== null}
+    <div class="status mono running"><span class="pulse" aria-hidden="true"></span>running Python… {consoleState.running}</div>
+  {:else if result}
     <div class="status mono" class:error={!result.ok}>
       {result.ok ? preview(result.value) : result.error.message}
     </div>
@@ -213,6 +215,29 @@
     display: flex;
     flex-direction: column;
     padding: 2px 0;
+    /* Script output keeps its line breaks. */
+    white-space: pre-wrap;
+  }
+  .running {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .pulse {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.3;
+    }
   }
   .echo {
     color: var(--text);

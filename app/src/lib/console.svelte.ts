@@ -6,6 +6,7 @@ import {
   fetchStructure,
   loadStructure,
   runCommand,
+  runPython,
   saveSession,
   sessionState,
   type CommandResult,
@@ -43,7 +44,19 @@ export const consoleState = $state({
   objects: [] as ObjectSummary[],
   /** Measure tool: atoms picked so far, or null when the tool is off. */
   measuring: null as PickInfo[] | null,
+  /** While a Python script runs: its latest output line ("" until it prints). */
+  running: null as string | null,
 });
+
+/** Called by the app for each line a running script prints. */
+export function scriptOutput(line: string) {
+  if (consoleState.running !== null) consoleState.running = line;
+}
+
+/** Re-reads session state, e.g. after a running script changed it. */
+export async function refreshState() {
+  applyState(await sessionState());
+}
 
 /** Turns the measure tool on or off. */
 export function toggleMeasuring() {
@@ -65,13 +78,24 @@ const HISTORY_LIMIT = 5;
 const RECENT_KEY = "rsmol.recent";
 const RECENT_LIMIT = 6;
 const FETCH = /^\s*fetch\s+(\S+)\s*$/i;
+const RUN = /^\s*run\s+(.+?)\s*$/i;
+const PYTHON = /^\s*python\s+(.+)$/is;
+/** Lines of script output kept in the history entry. */
+const OUTPUT_LINES = 30;
 
 /** Runs `input`. Real runs are logged; failures too when `logErrors` (button clicks). */
 export async function execute(input: string, { dryRun = false, logErrors = true } = {}): Promise<Outcome | null> {
   if (!input.trim()) return null;
   const fetchMatch = input.match(FETCH);
+  const runMatch = input.match(RUN);
+  const pythonMatch = input.match(PYTHON);
   let outcome: Outcome;
-  if (fetchMatch) {
+  if (runMatch || pythonMatch) {
+    // Scripts run in the app's Python, outside the core session.
+    const script = runMatch ? { path: runMatch[1] } : { code: pythonMatch![1] };
+    const what = runMatch ? `run ${runMatch[1]} with Python` : "run Python code";
+    outcome = dryRun ? { ok: true, value: { ...emptyResult(), message: what } } : await runScript(script);
+  } else if (fetchMatch) {
     // Downloading happens in the app, not the core session, so `fetch` is handled here.
     const id = fetchMatch[1].toUpperCase();
     outcome = dryRun
@@ -97,8 +121,29 @@ export async function execute(input: string, { dryRun = false, logErrors = true 
 const STRUCTURE_EXTENSIONS = ["cif", "mmcif", "pdb", "ent", "gz"];
 const SESSION_EXTENSION = "rsmol";
 
-/** Loads a structure or `.rsmol` session (dropped, chosen, passed on the command line, recent). */
+async function runScript(script: { path?: string; code?: string }): Promise<Outcome> {
+  consoleState.running = "";
+  try {
+    const { code, output } = await runPython(script);
+    const lines = output.trimEnd().split("\n");
+    const tail = (lines.length > OUTPUT_LINES ? ["…", ...lines.slice(-OUTPUT_LINES)] : lines).join("\n");
+    if (code === 0) return { ok: true, value: { ...emptyResult(), message: tail || "done" } };
+    return { ok: false, error: { start: 0, end: 0, message: tail || `Python exited with code ${code}` } };
+  } catch (e) {
+    return { ok: false, error: { start: 0, end: 0, message: String(e) } };
+  } finally {
+    consoleState.running = null;
+    await refreshState();
+  }
+}
+
+/** Loads a structure or `.rsmol` session (dropped, chosen, passed on the command line, recent),
+ * or runs a `.py` script. */
 export async function openFile(path: string) {
+  if (path.toLowerCase().endsWith(".py")) {
+    await execute(`run ${path}`);
+    return;
+  }
   const info = await loading(() => loadStructure(path));
   if (!info) return;
   const isSession = path.toLowerCase().endsWith(`.${SESSION_EXTENSION}`);
@@ -116,6 +161,7 @@ export async function chooseFile() {
     filters: [
       { name: "Structures and sessions", extensions: [...STRUCTURE_EXTENSIONS, SESSION_EXTENSION] },
       { name: "rsmol session", extensions: [SESSION_EXTENSION] },
+      { name: "Python script", extensions: ["py"] },
     ],
   });
   if (typeof path === "string") await openFile(path);
@@ -190,6 +236,11 @@ function applyState(r: CommandResult) {
   consoleState.objects = r.objects;
   // Everything deleted: back to the start screen.
   if (r.objects.length === 0) consoleState.structure = null;
+  // A script loaded the first structure: leave the start screen.
+  else if (!consoleState.structure) {
+    const o = r.objects[0];
+    consoleState.structure = { name: o.name, path: "", atoms: o.atoms, residues: o.residues, chains: o.chains, states: 1, parse_ms: 0 };
+  }
 }
 
 /** A result for actions handled in the UI (fetch), with no session state attached. */

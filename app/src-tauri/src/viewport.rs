@@ -25,6 +25,8 @@ pub enum CameraAction {
     Pan { dx: f32, dy: f32, height: f32 },
     /// `factor < 1` zooms in.
     Zoom { factor: f32 },
+    /// Rotate about a screen axis ('x', 'y' or 'z').
+    Turn { axis: char, degrees: f32 },
     Reset,
 }
 
@@ -201,6 +203,15 @@ impl ViewportState {
                 CameraAction::Orbit { dx, dy } => self.camera.orbit(dx, dy),
                 CameraAction::Pan { dx, dy, height } => self.camera.pan(dx, dy, height),
                 CameraAction::Zoom { factor } => self.camera.zoom(factor),
+                CameraAction::Turn { axis, degrees } => {
+                    let axis = match axis {
+                        'x' => glam::Vec3::X,
+                        'y' => glam::Vec3::Y,
+                        _ => glam::Vec3::Z,
+                    };
+                    let turn = glam::Quat::from_axis_angle(axis, degrees.to_radians());
+                    self.camera.rotation = (self.camera.rotation * turn).normalize();
+                }
                 CameraAction::Reset => self.fit_camera(),
             },
             Msg::Resize { width, height } => {

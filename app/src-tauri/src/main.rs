@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(unix)]
+mod scripting;
 mod viewport;
 
 use std::collections::BTreeSet;
@@ -14,20 +16,22 @@ use std::time::Instant;
 use rsmol_core::session::{Effect, PRESETS, Session, Source};
 use rsmol_core::session_file::CameraState;
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use viewport::{CameraAction, Msg};
 
-struct Viewport(Sender<Msg>);
+pub(crate) struct Viewport(Sender<Msg>);
 
 impl Viewport {
-    fn send(&self, msg: Msg) -> Result<(), String> {
+    pub(crate) fn send(&self, msg: Msg) -> Result<(), String> {
         self.0.send(msg).map_err(|_| "viewport thread has stopped".to_owned())
     }
 }
 
 #[derive(Serialize)]
-struct StructureInfo {
+pub(crate) struct StructureInfo {
     name: String,
+    /// The object name it was loaded as (made unique, or `name` for sessions).
+    pub(crate) object: String,
     path: String,
     atoms: usize,
     residues: usize,
@@ -42,7 +46,7 @@ async fn load_structure(
     viewport: State<'_, Viewport>,
     session: State<'_, Mutex<Session>>,
 ) -> Result<StructureInfo, String> {
-    load(PathBuf::from(path), &viewport, &session).await
+    load(PathBuf::from(path), None, &viewport, &session).await
 }
 
 /// Downloads an entry from the RCSB PDB (cached on disk) and loads it.
@@ -53,6 +57,12 @@ async fn fetch_structure(
     viewport: State<'_, Viewport>,
     session: State<'_, Mutex<Session>>,
 ) -> Result<StructureInfo, String> {
+    let path = fetch_to_cache(&app, &id).await?;
+    load(path, None, &viewport, &session).await
+}
+
+/// Downloads `<ID>.cif.gz` from the RCSB PDB into the app cache, unless already there.
+pub(crate) async fn fetch_to_cache(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
     let id = id.trim().to_ascii_uppercase();
     if !is_pdb_id(&id) {
         return Err(format!("'{id}' is not a PDB ID (four characters starting with a digit, e.g. 1HSG)"));
@@ -77,7 +87,7 @@ async fn fetch_structure(
         std::fs::write(&partial, bytes).map_err(|e| e.to_string())?;
         std::fs::rename(&partial, &path).map_err(|e| e.to_string())?;
     }
-    load(path, &viewport, &session).await
+    Ok(path)
 }
 
 /// Classic four-character PDB IDs, e.g. 1HSG.
@@ -87,7 +97,13 @@ fn is_pdb_id(id: &str) -> bool {
 
 /// Loads a structure file, or restores a `.rsmol` session (display, selections, measurements
 /// and camera included).
-async fn load(path: PathBuf, viewport: &Viewport, session: &Mutex<Session>) -> Result<StructureInfo, String> {
+/// `object` names the new object (structure files only).
+pub(crate) async fn load(
+    path: PathBuf,
+    object: Option<String>,
+    viewport: &Viewport,
+    session: &Mutex<Session>,
+) -> Result<StructureInfo, String> {
     let start = Instant::now();
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
     let is_session = path.extension().is_some_and(|e| e.eq_ignore_ascii_case(rsmol_core::session_file::EXTENSION));
@@ -97,7 +113,10 @@ async fn load(path: PathBuf, viewport: &Viewport, session: &Mutex<Session>) -> R
         if is_session {
             return Session::open(&bytes);
         }
-        let structure = rsmol_core::io::parse_bytes(&bytes, &file_name).map_err(|e| e.to_string())?;
+        let mut structure = rsmol_core::io::parse_bytes(&bytes, &file_name).map_err(|e| e.to_string())?;
+        if let Some(name) = object {
+            structure.name = name;
+        }
         let mut s = Session::default();
         s.load_with_source(Arc::new(structure), Source { file_name, data: Arc::new(bytes) });
         Ok((s, None))
@@ -112,8 +131,9 @@ async fn load(path: PathBuf, viewport: &Viewport, session: &Mutex<Session>) -> R
         loaded.objects[0].structure.clone()
     };
     let chains: BTreeSet<_> = structure.chains.iter().map(|c| c.id.clone()).collect();
-    let info = StructureInfo {
+    let mut info = StructureInfo {
         name: structure.name.clone(),
+        object: structure.name.clone(),
         path: path.to_string_lossy().into_owned(),
         atoms: structure.atom_count(),
         residues: structure.residues.len(),
@@ -132,14 +152,15 @@ async fn load(path: PathBuf, viewport: &Viewport, session: &Mutex<Session>) -> R
         }
     } else {
         let object = loaded.objects.into_iter().next().expect("loading made one object");
-        let (_, effects) = session.add_object(object.structure, object.source);
+        let (name, effects) = session.add_object(object.structure, object.source);
+        info.object = name;
         apply_effects(&session, effects, viewport);
     }
     Ok(info)
 }
 
 /// Forwards a command's effects to the render thread.
-fn apply_effects(session: &Session, effects: Vec<Effect>, viewport: &Viewport) {
+pub(crate) fn apply_effects(session: &Session, effects: Vec<Effect>, viewport: &Viewport) {
     for effect in effects {
         let msg = match effect {
             Effect::Highlight(atoms) => Msg::Highlight(atoms),
@@ -179,7 +200,7 @@ fn resolve_path(path: &str) -> PathBuf {
 }
 
 /// Writes a session (.rsmol) or the selected atoms (.pdb, .cif). Atomic: write, then rename.
-fn save_to(path: &Path, selection: &str, viewport: &Viewport, session: &Session) -> Result<String, String> {
+pub(crate) fn save_to(path: &Path, selection: &str, viewport: &Viewport, session: &Session) -> Result<String, String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
     let bytes = if ext == rsmol_core::session_file::EXTENSION {
         if selection != "all" {
@@ -375,6 +396,40 @@ fn state_result(session: &Session, message: String, canonical: Option<String>, a
     }
 }
 
+/// Runs a Python script file (`path`) or inline code against the live session.
+#[tauri::command]
+async fn run_python(path: Option<String>, code: Option<String>, app: AppHandle) -> Result<serde_json::Value, String> {
+    #[cfg(unix)]
+    {
+        let script = match (path, code) {
+            (Some(path), _) => scripting::Script::File(resolve_script_path(&path)),
+            (None, Some(code)) => scripting::Script::Code(code),
+            (None, None) => return Err("nothing to run".into()),
+        };
+        let handle = app.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || scripting::run(handle, script))
+            .await
+            .map_err(|e| e.to_string())??;
+        let _ = app.emit("session-changed", ());
+        serde_json::to_value(result).map_err(|e| e.to_string())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, code, app);
+        Err("running scripts needs macOS or Linux for now".into())
+    }
+}
+
+/// Like `resolve_path`, without adding an extension.
+fn resolve_script_path(path: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None if Path::new(path).is_relative() => home.join(path),
+        None => PathBuf::from(path),
+    }
+}
+
 /// A structure path passed on the command line, if any.
 #[tauri::command]
 fn startup_file() -> Option<String> {
@@ -398,7 +453,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![load_structure, fetch_structure, save_session, session_state, camera, pick, presets, run_command,
-            startup_file])
+            run_python, startup_file])
         .run(tauri::generate_context!())
         .expect("error while running rsmol");
 }

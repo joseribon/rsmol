@@ -82,6 +82,36 @@ impl AtomField {
     }
 }
 
+/// One atom's properties, as scripting front ends report them. `index` is 1-based, matching
+/// the `index` selection keyword.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct AtomInfo {
+    pub index: usize,
+    pub object: String,
+    pub chain: String,
+    pub segi: String,
+    pub resn: String,
+    pub resi: String,
+    pub name: String,
+    pub elem: String,
+    pub alt: String,
+    pub b: f32,
+    pub q: f32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub hetatm: bool,
+}
+
+/// A measurement as scripting front ends report it; atom indices are 1-based.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct MeasurementInfo {
+    pub name: String,
+    pub kind: String,
+    pub value: f32,
+    pub atoms: Vec<usize>,
+}
+
 /// A parsed `alter` value.
 enum FieldValue {
     Text(String),
@@ -639,6 +669,50 @@ impl Session {
         }
         self.rebuild_scene();
         Ok(vec![Effect::Scene { refit: false }, Effect::Display])
+    }
+
+    /// Properties of the selected atoms, in atom order.
+    pub fn atom_info(&self, selection: &str) -> Result<Vec<AtomInfo>, SelectionError> {
+        let set = self.select_atoms(selection)?;
+        let s = self.structure.as_ref().expect("a selection evaluated, so a structure is loaded");
+        let coords = s.coords(0).unwrap_or_default();
+        let objects = self.object_ranges();
+        Ok(set
+            .iter()
+            .map(|i| {
+                let r = s.residue_of(i);
+                let [x, y, z] = coords[i];
+                AtomInfo {
+                    index: i + 1,
+                    object: objects.iter().find(|(_, range)| range.contains(&i)).map(|(n, _)| n.clone()).unwrap_or_default(),
+                    chain: s.chain_of(i).id.clone(),
+                    segi: s.chain_of(i).label_id.clone(),
+                    resn: r.name.clone(),
+                    resi: format!("{}{}", r.seq_num, r.ins_code.map(String::from).unwrap_or_default()),
+                    name: s.atoms.name[i].clone(),
+                    elem: s.atoms.element[i].symbol().to_owned(),
+                    alt: s.atoms.alt_loc[i].map(String::from).unwrap_or_default(),
+                    b: s.atoms.b_factor[i],
+                    q: s.atoms.occupancy[i],
+                    x,
+                    y,
+                    z,
+                    hetatm: s.atoms.hetero[i],
+                }
+            })
+            .collect())
+    }
+
+    pub fn measurement_info(&self) -> Vec<MeasurementInfo> {
+        self.measurements
+            .iter()
+            .map(|m| MeasurementInfo {
+                name: m.name.clone(),
+                kind: format!("{:?}", m.kind).to_lowercase(),
+                value: m.value,
+                atoms: m.atoms.iter().map(|a| a + 1).collect(),
+            })
+            .collect()
     }
 
     /// The selected atoms as PDB (`format` "pdb"/"ent") or mmCIF ("cif"/"mmcif") text.

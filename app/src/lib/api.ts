@@ -93,6 +93,9 @@ export const pick = (x: number, y: number) =>
 export const runCommand = (text: string, dryRun: boolean) =>
   invoke<CommandResult>("run_command", { text, dryRun });
 export const startupFile = () => invoke<string | null>("startup_file");
+/** Runs a Python script file, or inline code, against the live session. */
+export const runPython = (script: { path?: string; code?: string }) =>
+  invoke<{ code: number | null; output: string }>("run_python", script);
 /** Saves the session to `path`; resolves to a status message. */
 export const saveSession = (path: string) => invoke<string>("save_session", { path });
 /** Selection, measurements and undo state, e.g. after a session file opens. */
