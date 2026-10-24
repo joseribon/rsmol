@@ -16,6 +16,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 
+[project.scripts]
+rsmol = "rsmol.__main__:main"
+
 [project.optional-dependencies]
 numpy = ["numpy"]
 

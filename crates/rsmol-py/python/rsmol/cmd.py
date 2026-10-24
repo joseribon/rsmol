@@ -265,6 +265,12 @@ def align(mobile: str, target: str) -> AlignResult:
 super = align  # noqa: A001 - PyMOL's name for structure-based superposition
 
 
+def quit() -> None:  # noqa: A001 - PyMOL's name
+    """Closes the rsmol window (ending the `rsmol` command), or exits a headless script."""
+    if not _session.quit():
+        raise SystemExit(0)
+
+
 def undo() -> None:
     do("undo")
 

@@ -76,5 +76,9 @@ class RemoteSession:
     def reset(self) -> None:
         self._call("reset")
 
+    def quit(self) -> bool:
+        # The app's window belongs to the user; a script ending does not close it.
+        return True
+
     def png(self, path, width: int = 1600, height: int = 1000) -> None:
         self._call("png", path=os.path.abspath(path), width=width, height=height)

@@ -3458,11 +3458,14 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "png",
+ "pollster",
  "pyo3",
  "pyo3-build-config",
  "rsmol-core",
  "rsmol-render",
  "ureq",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]
