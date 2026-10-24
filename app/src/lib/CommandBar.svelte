@@ -9,6 +9,34 @@
   let historyIndex = -1;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
+  // Collapsed by default so the history never covers the structure; the choice is remembered.
+  const HISTORY_KEY = "rsmol.historyExpanded";
+  let historyExpanded = $state(readFlag(HISTORY_KEY));
+  let historyList: HTMLOListElement | undefined = $state();
+
+  // Keep the newest entry in view when the list scrolls.
+  $effect(() => {
+    void consoleState.history.length;
+    historyList?.scrollTo({ top: historyList.scrollHeight });
+  });
+
+  function readFlag(key: string): boolean {
+    try {
+      return localStorage.getItem(key) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function toggleHistory() {
+    historyExpanded = !historyExpanded;
+    try {
+      localStorage.setItem(HISTORY_KEY, historyExpanded ? "1" : "0");
+    } catch {
+      // Storage unavailable: the toggle still works for this session.
+    }
+  }
+
   function oninput() {
     clearTimeout(timer);
     const input = text;
@@ -50,8 +78,8 @@
 </script>
 
 <div class="command panel">
-  {#if consoleState.history.length}
-    <ol class="history mono">
+  {#if historyExpanded && consoleState.history.length}
+    <ol class="history mono" id="command-history" bind:this={historyList}>
       {#each consoleState.history as entry}
         <li><span class="echo">› {entry.input}</span><span class:error={!entry.ok}>{entry.output}</span></li>
       {/each}
@@ -73,6 +101,21 @@
         <div class="carets mono" aria-hidden="true">{carets(result.error)}</div>
       {/if}
     </div>
+    {#if consoleState.history.length}
+      <button
+        class="history-toggle"
+        class:open={historyExpanded}
+        aria-expanded={historyExpanded}
+        aria-controls="command-history"
+        title={historyExpanded ? "Hide history" : "Show history"}
+        onclick={toggleHistory}
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="M2 6.5 5 3.5 8 6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <span class="mono">{consoleState.history.length}</span>
+      </button>
+    {/if}
   </div>
   {#if result}
     <div class="status mono" class:error={!result.ok}>
@@ -131,10 +174,37 @@
     color: var(--text-muted);
     white-space: pre-wrap;
   }
+  .history-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    align-self: center;
+  }
+  .history-toggle:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.09);
+  }
+  .history-toggle svg {
+    transition: transform 140ms ease;
+  }
+  /* Chevron points up (expand) when collapsed and down (collapse) when open. */
+  .history-toggle.open svg {
+    transform: rotate(180deg);
+  }
   .history {
     list-style: none;
     margin: 0 0 8px;
     padding: 0 0 8px;
+    /* Scroll rather than grow over the structure. */
+    max-height: 132px;
+    overflow-y: auto;
     border-bottom: 1px solid var(--panel-border);
     font-size: 12px;
     color: var(--text-muted);
