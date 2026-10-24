@@ -13,6 +13,7 @@
 //!   dihedral [<name>,] <a>, …, <d>   torsion about <b>–<c>
 //!   align <mobile>, <target>         superpose mobile's object onto target (sequence + fit)
 //!   enable / disable <object>|all    show or hide whole objects
+//!   alter <sel>, <field>=<value>,…   set name, resn, resi, chain, segi, elem, alt, b or q
 //!   delete <name>|all                remove an object, measurement or named selection
 //!   undo / redo                      step back or forward through changes
 //!   <selection>                      same as `select <selection>`
@@ -33,6 +34,98 @@ use crate::superpose::{self, Transform};
 use crate::Structure;
 
 const DEFAULT_SELECTION: &str = "sele";
+
+/// Atom properties `alter` can set. Residue- and chain-level fields (resn, resi, chain, segi)
+/// apply to the atom's whole residue or chain segment, which the data model shares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomField {
+    Name,
+    Resn,
+    Resi,
+    Chain,
+    Segi,
+    Elem,
+    Alt,
+    B,
+    Q,
+}
+
+impl AtomField {
+    pub const ALL: [AtomField; 9] = [
+        AtomField::Name,
+        AtomField::Resn,
+        AtomField::Resi,
+        AtomField::Chain,
+        AtomField::Segi,
+        AtomField::Elem,
+        AtomField::Alt,
+        AtomField::B,
+        AtomField::Q,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            AtomField::Name => "name",
+            AtomField::Resn => "resn",
+            AtomField::Resi => "resi",
+            AtomField::Chain => "chain",
+            AtomField::Segi => "segi",
+            AtomField::Elem => "elem",
+            AtomField::Alt => "alt",
+            AtomField::B => "b",
+            AtomField::Q => "q",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<AtomField> {
+        AtomField::ALL.into_iter().find(|f| f.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// A parsed `alter` value.
+enum FieldValue {
+    Text(String),
+    Number(f32),
+    Resi(i32, Option<char>),
+    Elem(crate::Element),
+    Alt(Option<char>),
+}
+
+fn parse_field_value(field: AtomField, raw: &str) -> Result<FieldValue, String> {
+    let text = raw.trim();
+    let unquoted = text
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .or_else(|| text.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')))
+        .unwrap_or(text);
+    Ok(match field {
+        AtomField::B | AtomField::Q => {
+            FieldValue::Number(unquoted.parse().map_err(|_| format!("{} must be a number, not '{unquoted}'", field.name()))?)
+        }
+        AtomField::Resi => {
+            let digits = unquoted.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+            let ins = unquoted[digits.len()..].chars().next();
+            let seq = digits.parse().map_err(|_| format!("resi must be a number with an optional insertion code, not '{unquoted}'"))?;
+            if unquoted.len() - digits.len() > 1 {
+                return Err(format!("insertion codes are one letter, not '{}'", &unquoted[digits.len()..]));
+            }
+            FieldValue::Resi(seq, ins)
+        }
+        AtomField::Elem => FieldValue::Elem(
+            crate::Element::from_symbol(unquoted).ok_or_else(|| format!("unknown element '{unquoted}'"))?,
+        ),
+        AtomField::Alt => {
+            let mut chars = unquoted.chars();
+            let alt = chars.next();
+            if chars.next().is_some() {
+                return Err(format!("alt locs are one character, not '{unquoted}'"));
+            }
+            FieldValue::Alt(alt)
+        }
+        AtomField::Name | AtomField::Resn if unquoted.is_empty() => return Err(format!("{} cannot be empty", field.name())),
+        _ => FieldValue::Text(unquoted.to_owned()),
+    })
+}
 
 /// One-click looks, as command lines, so front ends can show users the commands they run.
 pub const PRESETS: &[(&str, &str)] = &[
@@ -146,6 +239,7 @@ enum Command<'a> {
     Measure { kind: MeasurementKind, name: Option<Arg<'a>>, sels: Vec<Arg<'a>> },
     Delete { name: Arg<'a> },
     Align { mobile: Arg<'a>, target: Arg<'a> },
+    Alter { sel: Arg<'a>, assignments: Vec<(AtomField, Arg<'a>)> },
     Enable { name: Arg<'a>, enabled: bool },
 }
 
@@ -297,6 +391,26 @@ fn parse_command(text: &str, offset: usize) -> Result<Command<'_>, SelectionErro
             (mobile, Some(target)) if !mobile.text.is_empty() => Command::Align { mobile, target },
             _ => return Err(error(if args.text.is_empty() { end..end } else { span(args) }, "align takes <mobile>, <target>")),
         },
+        "alter" => {
+            let mut parts = if args.text.is_empty() { Vec::new() } else { split_commas(args) };
+            if parts.len() < 2 || parts[0].text.is_empty() {
+                return Err(error(if args.text.is_empty() { end..end } else { span(args) }, "alter takes <selection>, <field>=<value>[, …]"));
+            }
+            let sel = parts.remove(0);
+            let mut assignments = Vec::new();
+            for part in parts {
+                let Some(eq) = part.text.find('=') else {
+                    return Err(error(span(part), "expected <field>=<value>, e.g. b=0 or chain=B"));
+                };
+                let field_arg = trimmed(&part.text[..eq], part.offset);
+                let field = AtomField::from_name(field_arg.text).ok_or_else(|| {
+                    let names: Vec<_> = AtomField::ALL.iter().map(|f| f.name()).collect();
+                    error(span(field_arg), format!("cannot alter '{}'; fields are {}", field_arg.text, names.join(", ")))
+                })?;
+                assignments.push((field, trimmed(&part.text[eq + 1..], part.offset + eq + 1)));
+            }
+            Command::Alter { sel, assignments }
+        }
         kw @ ("enable" | "disable") => {
             if args.text.is_empty() {
                 return Err(error(end..end, format!("{kw} needs an object name or all")));
@@ -461,6 +575,85 @@ impl Session {
             m.atoms = m.atoms.iter().map(|&a| map(a).unwrap()).collect();
         }
         self.remeasure();
+    }
+
+    /// Sets atom properties, one `(atom, field, value)` per change; values are parsed as the
+    /// command language does (numbers for b/q, `27A` for resi, element symbols, …). One undo
+    /// step. Altered objects re-embed their current structure, so saved sessions keep the edits.
+    pub fn alter(&mut self, changes: &[(usize, AtomField, String)]) -> Result<Vec<Effect>, String> {
+        let before = self.snapshot();
+        let effects = self.apply_alter(changes)?;
+        self.record(before);
+        Ok(effects)
+    }
+
+    fn apply_alter(&mut self, changes: &[(usize, AtomField, String)]) -> Result<Vec<Effect>, String> {
+        let n = self.atom_count();
+        let parsed: Vec<(usize, FieldValue)> = changes
+            .iter()
+            .map(|(i, field, raw)| {
+                if *i >= n {
+                    return Err(format!("atom index {} out of range", i + 1));
+                }
+                parse_field_value(*field, raw).map(|v| (*i, v))
+            })
+            .collect::<Result<_, _>>()?;
+        let fields: Vec<AtomField> = changes.iter().map(|c| c.1).collect();
+        if parsed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ranges = self.object_ranges();
+        let mut edited: Vec<Option<Structure>> = vec![None; self.objects.len()];
+        for ((i, value), field) in parsed.into_iter().zip(fields) {
+            let k = ranges.partition_point(|(_, r)| r.end <= i);
+            let local = i - ranges[k].1.start;
+            let s = edited[k].get_or_insert_with(|| (*self.objects[k].structure).clone());
+            let residue = s.atoms.residue[local] as usize;
+            let chain = s.residues[residue].chain as usize;
+            match (field, value) {
+                (AtomField::Name, FieldValue::Text(t)) => s.atoms.name[local] = t,
+                (AtomField::Resn, FieldValue::Text(t)) => s.residues[residue].name = t,
+                (AtomField::Chain, FieldValue::Text(t)) => s.chains[chain].id = t,
+                (AtomField::Segi, FieldValue::Text(t)) => s.chains[chain].label_id = t,
+                (AtomField::Resi, FieldValue::Resi(seq, ins)) => {
+                    s.residues[residue].seq_num = seq;
+                    s.residues[residue].ins_code = ins;
+                }
+                (AtomField::Elem, FieldValue::Elem(e)) => s.atoms.element[local] = e,
+                (AtomField::Alt, FieldValue::Alt(a)) => s.atoms.alt_loc[local] = a,
+                (AtomField::B, FieldValue::Number(v)) => s.atoms.b_factor[local] = v,
+                (AtomField::Q, FieldValue::Number(v)) => s.atoms.occupancy[local] = v,
+                _ => unreachable!("parse_field_value returns the variant for its field"),
+            }
+        }
+        for (k, structure) in edited.into_iter().enumerate() {
+            let Some(structure) = structure else { continue };
+            let object = &mut self.objects[k];
+            // The embedded file must now carry the edits; its coordinates already include
+            // `transform`, so that resets to identity.
+            let all: Vec<usize> = (0..structure.atom_count()).collect();
+            let data = crate::io::write::to_mmcif(&structure, &all).into_bytes();
+            object.source = Some(Source { file_name: format!("{}.cif", object.name), data: Arc::new(data) });
+            object.transform = Transform::IDENTITY;
+            object.structure = Arc::new(structure);
+        }
+        self.rebuild_scene();
+        Ok(vec![Effect::Scene { refit: false }, Effect::Display])
+    }
+
+    /// The selected atoms as PDB (`format` "pdb"/"ent") or mmCIF ("cif"/"mmcif") text.
+    pub fn export(&self, format: &str, selection: &str) -> Result<String, String> {
+        let set = self.select_atoms(selection).map_err(|e| e.render(selection))?;
+        if set.is_empty() {
+            return Err("nothing to save: the selection is empty".into());
+        }
+        let structure = self.structure.as_ref().expect("a selection matched, so a structure is loaded");
+        let atoms: Vec<usize> = set.iter().collect();
+        match format.to_ascii_lowercase().as_str() {
+            "pdb" | "ent" => crate::io::write::to_pdb(structure, &atoms),
+            "cif" | "mmcif" => Ok(crate::io::write::to_mmcif(structure, &atoms)),
+            other => Err(format!("cannot save '.{other}' files; use .pdb, .cif or .rsmol")),
+        }
     }
 
     /// Evaluates a selection against the scene, with named selections, objects and `visible`.
@@ -745,6 +938,22 @@ impl Session {
                 };
                 (message, None, mobile_set, effects)
             }
+            Command::Alter { sel, assignments } => {
+                let (set, canonical) = evaluate(Some(sel))?;
+                let mut changes = Vec::new();
+                for (field, value) in &assignments {
+                    parse_field_value(*field, value.text).map_err(|m| error(span(*value), m))?;
+                    changes.extend(set.iter().map(|i| (i, *field, value.text.to_owned())));
+                }
+                let summary: Vec<String> = assignments.iter().map(|(f, v)| format!("{}={}", f.name(), v.text)).collect();
+                let message = format!("alter {} atoms: {}", set.count(), summary.join(", "));
+                let effects = if dry_run {
+                    Vec::new()
+                } else {
+                    self.apply_alter(&changes).map_err(|m| error(span(sel), m))?
+                };
+                (message, canonical, set, effects)
+            }
             Command::Enable { name, enabled } => {
                 let all = name.text.eq_ignore_ascii_case("all");
                 let hits: Vec<usize> =
@@ -1013,6 +1222,39 @@ HETATM    7 ZN    ZN A 101       9.000   0.000   0.000  1.00  0.00          ZN
         assert_ne!(reps(&s), original);
         s.run("undo", false).unwrap();
         assert_eq!(reps(&s), original);
+    }
+
+    #[test]
+    fn alter_sets_properties_and_is_undoable() {
+        let mut s = session();
+        let out = s.run("alter resi 1, b=12.5, chain=Z", false).unwrap();
+        assert_eq!(out.message, "alter 3 atoms: b=12.5, chain=Z");
+        let st = s.structure.clone().unwrap();
+        assert_eq!(st.atoms.b_factor[0], 12.5);
+        assert_eq!(st.chain_of(0).id, "Z");
+        assert_eq!(s.run("chain Z", true).unwrap().atoms, Some(7)); // chain is per segment: all of A
+        s.run("alter index 2, name=\"CX\", resi=27A, elem=N", false).unwrap();
+        let st = s.structure.clone().unwrap();
+        assert_eq!((st.atoms.name[1].as_str(), st.residue_of(1).seq_num, st.residue_of(1).ins_code), ("CX", 27, Some('A')));
+        assert_eq!(st.atoms.element[1], crate::Element::N);
+        // The embedded source now carries the edits.
+        let source = s.objects[0].source.as_ref().unwrap();
+        assert!(String::from_utf8_lossy(&source.data).contains(" CX "));
+        s.run("undo", false).unwrap();
+        assert_eq!(s.structure.as_ref().unwrap().atoms.name[1], "CA");
+    }
+
+    #[test]
+    fn alter_errors() {
+        let mut s = session();
+        let text = "alter all, b=high";
+        let err = s.run(text, true).unwrap_err();
+        assert_eq!(&text[err.span.clone()], "high");
+        assert_eq!(err.message, "b must be a number, not 'high'");
+        let text = "alter all, color=red";
+        assert_eq!(&text[s.run(text, true).unwrap_err().span], "color");
+        assert!(s.run("alter all, elem=Xx", true).unwrap_err().message.contains("unknown element"));
+        assert!(s.run("alter all", true).is_err());
     }
 
     #[test]

@@ -63,6 +63,29 @@ class CmdTest(unittest.TestCase):
         self.assertEqual(len(coords), 5)
         self.assertTrue(all(len(c) == 3 for c in coords))
 
+    def test_alter_with_expressions(self):
+        n = cmd.alter("polymer.protein", "b = 10.0 * len(name)")
+        self.assertEqual(n, 20)
+        self.assertEqual(cmd.get_atoms("index 2")[0]["b"], 20.0)  # "CA"
+        cmd.alter("resi 1 and polymer.protein", "chain = 'Q'")
+        self.assertEqual(cmd.count_atoms("chain Q"), 21)  # the whole chain segment, ion included
+        # Unchanged atoms are not reported.
+        self.assertEqual(cmd.alter("all", "b = b"), 0)
+        cmd.undo()
+        self.assertEqual(cmd.count_atoms("chain Q"), 0)
+        with self.assertRaises(ValueError):
+            cmd.alter("index 1", "elem = 'Qq'")
+
+    def test_export_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for ext in ("pdb", "cif"):
+                path = os.path.join(tmp, f"out.{ext}")
+                cmd.save(path, "traces and polymer.protein")
+                cmd.load(path, f"copy_{ext}")
+                self.assertEqual(cmd.count_atoms(f"copy_{ext}"), 20)
+            with self.assertRaises(ValueError):
+                cmd.save(os.path.join(tmp, "out.xyz"))
+
     def test_png_and_session_round_trip(self):
         cmd.show_as("sticks")
         cmd.color("coral", "chain A")
@@ -79,6 +102,8 @@ class CmdTest(unittest.TestCase):
             self.assertEqual(cmd.count_atoms("visible"), 27)
         with self.assertRaises(ValueError):
             cmd.save("out.pse")
+        with self.assertRaises(ValueError):
+            cmd.save("x.rsmol", "chain A")
 
 
 if __name__ == "__main__":

@@ -107,3 +107,45 @@ fn concat_offsets_indices_and_pads_states() {
     assert!(s.bonds.iter().all(|bond| bond.atoms.iter().all(|&x| (x as usize) < 38)));
     assert!(s.bonds.iter().any(|bond| bond.atoms[0] >= 11));
 }
+
+fn same_content(a: &Structure, b: &Structure) {
+    assert_eq!(a.atoms.name, b.atoms.name);
+    assert_eq!(a.atoms.element, b.atoms.element);
+    assert_eq!(a.atoms.alt_loc, b.atoms.alt_loc);
+    assert_eq!(a.atoms.hetero, b.atoms.hetero);
+    let res = |s: &Structure| s.residues.iter().map(|r| (r.name.clone(), r.seq_num, r.ins_code, r.ss)).collect::<Vec<_>>();
+    assert_eq!(res(a), res(b));
+    assert_eq!(a.states.len(), b.states.len());
+    for (sa, sb) in a.states.iter().zip(&b.states) {
+        for (p, q) in sa.iter().zip(sb) {
+            assert!((0..3).all(|k| (p[k] - q[k]).abs() < 1e-3));
+        }
+    }
+}
+
+#[test]
+fn mmcif_and_pdb_round_trip() {
+    use rsmol_core::io::write::{to_mmcif, to_pdb};
+    let s = fixture();
+    let all: Vec<usize> = (0..s.atom_count()).collect();
+    let cif = io::parse_bytes(to_mmcif(&s, &all).as_bytes(), "out.cif").unwrap();
+    same_content(&s, &cif);
+    assert_eq!(cif.chains.iter().map(|c| c.label_id.as_str()).collect::<Vec<_>>(), ["A", "B", "C", "D"]);
+    let pdb = io::parse_bytes(to_pdb(&s, &all).unwrap().as_bytes(), "out.pdb").unwrap();
+    same_content(&s, &pdb);
+    // CONECT carries the ligand bond to HEM's iron? It is metal coordination, so not written.
+    assert!(!to_pdb(&s, &all).unwrap().contains("CONECT    9   10"));
+}
+
+#[test]
+fn exporting_a_subset_and_pdb_limits() {
+    use rsmol_core::io::write::to_pdb;
+    let s = fixture();
+    let text = to_pdb(&s, &[0, 1, 2, 3]).unwrap();
+    let back = io::parse_bytes(text.as_bytes(), "x.pdb").unwrap();
+    assert_eq!(back.atom_count(), 4);
+    assert_eq!(back.residues.len(), 1);
+    let mut long = s.clone();
+    long.chains[0].id = "AA".into();
+    assert!(to_pdb(&long, &[0]).unwrap_err().contains("save as .cif"));
+}

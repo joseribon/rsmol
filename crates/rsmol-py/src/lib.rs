@@ -11,7 +11,7 @@ use glam::{Quat, Vec3};
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use rsmol_core::session::{Effect, Session as CoreSession, Source};
+use rsmol_core::session::{AtomField, Effect, Session as CoreSession, Source};
 use rsmol_core::session_file::{CameraState, EXTENSION};
 use rsmol_render::Camera;
 use rsmol_render::offscreen::Offscreen;
@@ -298,6 +298,32 @@ impl Session {
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().map_err(|e| PyIOError::new_err(e.to_string()))?;
         writer.write_image_data(&pixels).map_err(|e| PyIOError::new_err(e.to_string()))
+    }
+
+    /// Sets atom properties: `(index, field, value)` triples with 1-based indices and the fields
+    /// name, resn, resi, chain, segi, elem, alt, b, q. One undo step. Returns the change count.
+    fn alter(&mut self, changes: Vec<(usize, String, String)>) -> PyResult<usize> {
+        let changes = changes
+            .into_iter()
+            .map(|(index, field, value)| {
+                let field = AtomField::from_name(&field)
+                    .ok_or_else(|| PyValueError::new_err(format!("cannot alter '{field}'")))?;
+                let atom = index.checked_sub(1).ok_or_else(|| PyValueError::new_err("atom indices start at 1"))?;
+                Ok((atom, field, value))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let count = changes.len();
+        let effects = self.inner.alter(&changes).map_err(PyValueError::new_err)?;
+        self.apply(&effects);
+        Ok(count)
+    }
+
+    /// Writes the selected atoms as PDB or mmCIF, chosen by the file extension.
+    #[pyo3(signature = (path, selection="all"))]
+    fn export(&self, path: PathBuf, selection: &str) -> PyResult<()> {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        let text = self.inner.export(ext, selection).map_err(PyValueError::new_err)?;
+        std::fs::write(&path, text).map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
     }
 
     /// Saves a `.rsmol` session (opens in the rsmol app) with the current view.

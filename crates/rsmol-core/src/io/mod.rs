@@ -2,6 +2,7 @@ mod builder;
 pub mod cif;
 pub mod mmcif;
 pub mod pdb;
+pub mod write;
 
 use std::fmt;
 use std::path::Path;

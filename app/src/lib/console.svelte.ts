@@ -125,16 +125,25 @@ export async function chooseFile() {
 export async function chooseSaveLocation() {
   if (!consoleState.structure) return;
   const path = await saveDialog({
-    defaultPath: `${consoleState.structure.name}.${SESSION_EXTENSION}`,
-    filters: [{ name: "rsmol session", extensions: [SESSION_EXTENSION] }],
+    defaultPath: `${consoleState.objects[0]?.name ?? consoleState.structure.name}.${SESSION_EXTENSION}`,
+    filters: [
+      { name: "rsmol session", extensions: [SESSION_EXTENSION] },
+      { name: "PDB", extensions: ["pdb"] },
+      { name: "mmCIF", extensions: ["cif"] },
+    ],
   });
   if (!path) return;
-  try {
-    const message = await saveSession(path);
-    log({ input: "save session", output: message, ok: true });
-    remember({ kind: "file", path, name: path.split("/").pop() ?? path });
-  } catch (e) {
-    log({ input: "save session", output: String(e), ok: false });
+  if (path.toLowerCase().endsWith(`.${SESSION_EXTENSION}`)) {
+    try {
+      const message = await saveSession(path);
+      log({ input: "save session", output: message, ok: true });
+      remember({ kind: "file", path, name: path.split("/").pop() ?? path });
+    } catch (e) {
+      log({ input: "save session", output: String(e), ok: false });
+    }
+  } else {
+    // Structure formats go through the command, so the history shows how to script it.
+    await execute(`save ${path}`);
   }
 }
 

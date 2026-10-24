@@ -57,11 +57,16 @@ def fetch(code: str, name: str | None = None) -> str:
     return _session.fetch(code, name or None)
 
 
-def save(filename: str) -> None:
-    """Saves a .rsmol session, which the rsmol app opens with display, selections and view."""
-    if not str(filename).lower().endswith(".rsmol"):
-        raise ValueError("only .rsmol sessions can be saved for now")
-    _session.save(str(filename))
+def save(filename: str, selection: str = "all") -> None:
+    """Saves by extension: .rsmol (a session the rsmol app opens with display, selections and
+    view), or .pdb / .cif with the selected atoms."""
+    path = str(filename)
+    if path.lower().endswith(".rsmol"):
+        if selection != "all":
+            raise ValueError("sessions always hold everything; omit the selection")
+        _session.save(path)
+    else:
+        _session.export(path, selection)
 
 
 def png(filename: str, width: int = 1600, height: int = 1000, dpi: float = -1, ray: int = 0) -> None:
@@ -122,6 +127,32 @@ def get_atoms(selection: str = "all") -> list[dict[str, Any]]:
     """One dict per atom with index, object, chain, segi, resn, resi, name, elem, alt, b, q,
     x, y, z and hetatm."""
     return _session.get_atoms(selection)
+
+
+_ALTERABLE = ("name", "resn", "resi", "chain", "segi", "elem", "alt", "b", "q")
+
+
+def alter(selection: str, expression: str, space: dict[str, Any] | None = None) -> int:
+    """Runs `expression` per atom, as `iterate` does, and stores any changed name, resn, resi,
+    chain, segi, elem, alt, b or q — e.g. `alter("chain A", "chain = 'B'")` or
+    `alter("all", "b = 0.0")`. Residue and chain fields apply to the whole residue/chain.
+    One undo step. Returns the number of atoms changed."""
+    code = compile(expression, "<alter>", "exec")
+    namespace = space if space is not None else {}
+    changes: list[tuple[int, str, str]] = []
+    changed_atoms = 0
+    for atom in get_atoms(selection):
+        local = dict(atom)
+        local["model"] = atom["object"]
+        exec(code, namespace, local)
+        before = len(changes)
+        for field in _ALTERABLE:
+            if local[field] != atom[field]:
+                changes.append((atom["index"], field, str(local[field])))
+        changed_atoms += len(changes) > before
+    if changes:
+        _session.alter(changes)
+    return changed_atoms
 
 
 def iterate(selection: str, expression: str, space: dict[str, Any] | None = None) -> int:

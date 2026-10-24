@@ -6,7 +6,7 @@ mod macos;
 mod viewport;
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -159,21 +159,42 @@ fn apply_effects(session: &Session, effects: Vec<Effect>, viewport: &Viewport) {
 
 /// Saves the session (structure, display, selections, measurements, camera) to `path`.
 #[tauri::command]
-async fn save_session(path: String, viewport: State<'_, Viewport>, session: State<'_, Mutex<Session>>) -> Result<String, String> {
-    let (reply, answer) = std::sync::mpsc::channel();
-    viewport.send(Msg::GetCamera(reply))?;
-    let camera = tauri::async_runtime::spawn_blocking(move || answer.recv_timeout(std::time::Duration::from_secs(1)).ok())
-        .await
-        .map_err(|e| e.to_string())?;
-    let bytes = session.lock().unwrap().save(camera)?;
-    let mut path = PathBuf::from(path);
-    if path.extension().is_none() {
-        path.set_extension(rsmol_core::session_file::EXTENSION);
+fn save_session(path: String, viewport: State<'_, Viewport>, session: State<'_, Mutex<Session>>) -> Result<String, String> {
+    save_to(&resolve_path(&path), "all", &viewport, &session.lock().unwrap())
+}
+
+/// `~/x` and relative paths resolve against the home folder (the app's working directory is
+/// `/` when started from the Finder); a path without extension becomes a session.
+fn resolve_path(path: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let mut p = match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None if Path::new(path).is_relative() => home.join(path),
+        None => PathBuf::from(path),
+    };
+    if p.extension().is_none() {
+        p.set_extension(rsmol_core::session_file::EXTENSION);
     }
-    // Write then rename, so a failed save never truncates an existing session.
-    let partial = path.with_extension("rsmol.partial");
-    std::fs::write(&partial, &bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&partial, &path).map_err(|e| e.to_string())?;
+    p
+}
+
+/// Writes a session (.rsmol) or the selected atoms (.pdb, .cif). Atomic: write, then rename.
+fn save_to(path: &Path, selection: &str, viewport: &Viewport, session: &Session) -> Result<String, String> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let bytes = if ext == rsmol_core::session_file::EXTENSION {
+        if selection != "all" {
+            return Err("sessions always hold everything; omit the selection".into());
+        }
+        let (reply, answer) = std::sync::mpsc::channel();
+        viewport.send(Msg::GetCamera(reply))?;
+        let camera = answer.recv_timeout(std::time::Duration::from_secs(1)).ok();
+        session.save(camera)?
+    } else {
+        session.export(&ext, selection)?.into_bytes()
+    };
+    let partial = path.with_extension(format!("{ext}.partial"));
+    std::fs::write(&partial, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(format!("saved {} ({:.1} MB)", path.display(), bytes.len() as f64 / 1e6))
 }
 
@@ -296,6 +317,26 @@ fn run_command(
     session: State<'_, Mutex<Session>>,
 ) -> Result<CommandResult, SelectionErrorInfo> {
     let mut session = session.lock().unwrap();
+    // `save` writes files, which is the app's job rather than the core session's.
+    let line = text.trim_start();
+    let word_end = line.find(char::is_whitespace).unwrap_or(line.len());
+    if line[..word_end].eq_ignore_ascii_case("save") {
+        let args = line[word_end..].trim();
+        if args.is_empty() {
+            let end = text.chars().count();
+            return Err(SelectionErrorInfo { start: end, end, message: "save needs a file name (.rsmol, .pdb or .cif)".into() });
+        }
+        let (path, selection) = args.split_once(',').map_or((args.trim(), "all"), |(p, s)| (p.trim(), s.trim()));
+        let resolved = resolve_path(path);
+        let failed = |message: String| SelectionErrorInfo { start: 0, end: text.chars().count(), message };
+        let message = if dry_run {
+            let atoms = session.select_atoms(selection).map(|s| s.count()).unwrap_or(0);
+            format!("save {atoms} atoms to {}", resolved.display())
+        } else {
+            save_to(&resolved, selection, &viewport, &session).map_err(failed)?
+        };
+        return Ok(state_result(&session, message, None, None));
+    }
     let outcome = session.run(&text, dry_run).map_err(|e| SelectionErrorInfo {
         start: text[..e.span.start].chars().count(),
         end: text[..e.span.end].chars().count(),
