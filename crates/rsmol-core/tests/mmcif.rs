@@ -1,0 +1,68 @@
+use rsmol_core::{BondKind, Element, EntityKind, SecondaryStructure, Structure, io};
+
+const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
+
+fn fixture() -> Structure {
+    io::read(format!("{DATA}/two_models.cif")).unwrap()
+}
+
+#[test]
+fn chains_split_by_label_id() {
+    let s = fixture();
+    let chains: Vec<_> = s.chains.iter().map(|c| (c.id.as_str(), c.label_id.as_str())).collect();
+    assert_eq!(chains, [("A", "A"), ("B", "B"), ("B", "C"), ("B", "D")]);
+
+    let kinds: Vec<_> = s.chains.iter().map(|c| s.entities[c.entity.unwrap() as usize].kind).collect();
+    assert_eq!(kinds, [EntityKind::Polymer, EntityKind::Polymer, EntityKind::NonPolymer, EntityKind::Water]);
+    assert_eq!(s.entities[1].description, "PROTOPORPHYRIN IX CONTAINING FE");
+}
+
+#[test]
+fn atoms_use_author_numbering() {
+    let s = fixture();
+    assert_eq!(s.atom_count(), 11);
+    let residues: Vec<_> = s.residues.iter().map(|r| (r.name.as_str(), r.seq_num, r.ins_code)).collect();
+    assert_eq!(
+        residues,
+        [("GLY", 1, None), ("ALA", 2, None), ("SER", 2, Some('A')), ("GLY", 1, None), ("HEM", 201, None), ("HOH", 301, None)]
+    );
+    assert_eq!(s.atoms.alt_loc[5..7], [Some('A'), Some('B')]);
+    assert_eq!(s.atoms.element[9], Element(26));
+    assert!(s.atoms.hetero[9] && !s.atoms.hetero[8]);
+}
+
+#[test]
+fn models_become_states() {
+    let s = fixture();
+    assert_eq!(s.state_count(), 2);
+    assert_eq!(s.coords(1).unwrap()[10], [14.1, 2.0, -2.0]);
+}
+
+#[test]
+fn secondary_structure() {
+    let s = fixture();
+    let ss: Vec<_> = s.residues.iter().map(|r| r.ss).collect();
+    use SecondaryStructure::*;
+    // Helix A1..A2A, turn ignored, strand B1.
+    assert_eq!(ss, [Helix, Helix, Helix, Sheet, Loop, Loop]);
+}
+
+#[test]
+fn struct_conn_bonds() {
+    let s = fixture();
+    // Symmetry-mate and hydrogen-bond records are skipped; the covalent partner without an
+    // alt id binds the first conformer.
+    let bonds: Vec<_> = s.bonds.iter().map(|b| (b.atoms, b.kind)).collect();
+    assert_eq!(bonds, [([5, 7], BondKind::Covalent), ([8, 9], BondKind::MetalCoordination)]);
+}
+
+#[test]
+fn pdb_and_mmcif_agree() {
+    let pdb = io::read(format!("{DATA}/two_models.pdb")).unwrap();
+    let cif = fixture();
+    assert_eq!(pdb.states, cif.states);
+    assert_eq!(pdb.residues.iter().map(|r| (&r.name, r.seq_num, r.ins_code)).collect::<Vec<_>>(),
+               cif.residues.iter().map(|r| (&r.name, r.seq_num, r.ins_code)).collect::<Vec<_>>());
+    assert_eq!(pdb.atoms.name, cif.atoms.name);
+    assert_eq!(pdb.atoms.element, cif.atoms.element);
+}

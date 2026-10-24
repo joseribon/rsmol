@@ -16,6 +16,9 @@ pub struct Structure {
     pub atoms: Atoms,
     pub residues: Vec<Residue>,
     pub chains: Vec<Chain>,
+    pub entities: Vec<Entity>,
+    /// Bonds read from the file (CONECT / struct_conn). Sorted, deduplicated, `atoms[0] < atoms[1]`.
+    pub bonds: Vec<Bond>,
     /// One coordinate set per state; each has `atoms.len()` entries.
     pub states: Vec<Vec<Vec3>>,
 }
@@ -40,15 +43,63 @@ pub struct Residue {
     pub name: String,
     pub seq_num: i32,
     pub ins_code: Option<char>,
+    pub ss: SecondaryStructure,
     /// Index into `Structure::chains`.
     pub chain: u32,
     pub atoms: Range<u32>,
 }
 
+/// A contiguous run of residues belonging to one molecule.
+///
+/// mmCIF distinguishes the author chain ID (`auth_asym_id`, what PyMOL calls `chain` and what
+/// papers cite) from the per-molecule label ID (`label_asym_id`, PyMOL's `segi`): a protein chain
+/// "A" and its bound ligands and waters share `id` but each gets its own `label_id`. PDB files
+/// only have the author ID, so there `label_id == id`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chain {
     pub id: String,
+    pub label_id: String,
+    /// Index into `Structure::entities`.
+    pub entity: Option<u32>,
     pub residues: Range<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entity {
+    pub id: String,
+    pub kind: EntityKind,
+    pub description: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EntityKind {
+    Polymer,
+    NonPolymer,
+    Water,
+    Branched,
+    #[default]
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SecondaryStructure {
+    #[default]
+    Loop,
+    Helix,
+    Sheet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Bond {
+    pub atoms: [u32; 2],
+    pub kind: BondKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BondKind {
+    Covalent,
+    Disulfide,
+    MetalCoordination,
 }
 
 impl Atoms {

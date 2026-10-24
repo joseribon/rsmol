@@ -8,4 +8,6 @@ pub mod io;
 mod structure;
 
 pub use element::Element;
-pub use structure::{Atoms, Chain, Residue, Structure, Vec3};
+pub use structure::{
+    Atoms, Bond, BondKind, Chain, Entity, EntityKind, Residue, SecondaryStructure, Structure, Vec3,
+};

@@ -1,41 +1,41 @@
-//! PDB format reader (ATOM/HETATM/MODEL records).
+//! PDB format reader (ATOM/HETATM/MODEL/HELIX/SHEET/CONECT records).
 //!
-//! Spec: <https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html>
+//! Spec: <https://www.wwpdb.org/documentation/file-format-content/format33/v3.3.html>
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use crate::io::builder::{AtomRecord, SsRange, StructureBuilder};
 use crate::io::ParseError;
-use crate::structure::{Chain, Residue, Structure, Vec3};
+use crate::structure::{BondKind, SecondaryStructure, Structure, Vec3};
 use crate::Element;
 
 pub fn read(path: impl AsRef<Path>) -> Result<Structure, ParseError> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|e| ParseError::io(path, e))?;
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    parse(&text, name)
+    parse(&text, super::file_stem(path))
 }
 
 pub fn parse(text: &str, name: impl Into<String>) -> Result<Structure, ParseError> {
-    let mut s = Structure { name: name.into(), ..Default::default() };
-    let mut coords: Vec<Vec3> = Vec::new();
-    // `true` once the first MODEL is complete; later models only contribute coordinates.
-    let mut topology_done = false;
+    let mut b = StructureBuilder::new(name);
     let mut in_model = false;
+    let mut serial_to_index: HashMap<i32, u32> = HashMap::new();
+    let mut conect: Vec<(i32, i32)> = Vec::new();
+    let mut last_line = 0;
 
     for (idx, line) in text.lines().enumerate() {
         let line_no = idx + 1;
+        last_line = line_no;
         let record = col(line, 1, 6);
         match record.trim_end() {
             "ATOM" | "HETATM" => {
-                let pos = parse_coords(line).map_err(|m| ParseError::at(line_no, m))?;
-                if topology_done {
-                    if coords.len() >= s.atom_count() {
-                        return Err(ParseError::at(line_no, "model has more atoms than model 1"));
-                    }
-                } else {
-                    push_atom(&mut s, line, record == "HETATM");
+                let before = b.atom_count();
+                let rec = parse_atom(line, record == "HETATM").map_err(|m| ParseError::at(line_no, m))?;
+                let serial = rec.serial;
+                b.atom(rec).map_err(|m| ParseError::at(line_no, m))?;
+                if b.atom_count() > before && serial >= 0 {
+                    serial_to_index.insert(serial, before as u32);
                 }
-                coords.push(pos);
             }
             "MODEL" => {
                 if in_model {
@@ -44,75 +44,62 @@ pub fn parse(text: &str, name: impl Into<String>) -> Result<Structure, ParseErro
                 in_model = true;
             }
             "ENDMDL" => {
-                finish_state(&mut s, &mut coords, line_no)?;
-                topology_done = true;
+                b.end_state().map_err(|m| ParseError::at(line_no, m))?;
                 in_model = false;
+            }
+            "HELIX" => b.add_secondary_structure(SsRange {
+                kind: SecondaryStructure::Helix,
+                chain_id: col(line, 20, 20).trim().to_owned(),
+                start: residue_id(line, 22, 26),
+                end: residue_id(line, 34, 38),
+            }),
+            "SHEET" => b.add_secondary_structure(SsRange {
+                kind: SecondaryStructure::Sheet,
+                chain_id: col(line, 22, 22).trim().to_owned(),
+                start: residue_id(line, 23, 27),
+                end: residue_id(line, 34, 38),
+            }),
+            "CONECT" => {
+                let Ok(from) = col(line, 7, 11).trim().parse() else { continue };
+                for start in [12, 17, 22, 27] {
+                    if let Ok(to) = col(line, start, start + 4).trim().parse() {
+                        conect.push((from, to));
+                    }
+                }
             }
             "END" => break,
             _ => {}
         }
     }
 
-    // Files without MODEL records, or whose last MODEL lacks ENDMDL.
-    if !coords.is_empty() {
-        finish_state(&mut s, &mut coords, text.lines().count())?;
+    for (from, to) in conect {
+        if let (Some(&a), Some(&c)) = (serial_to_index.get(&from), serial_to_index.get(&to)) {
+            b.add_bond(a, c, BondKind::Covalent);
+        }
     }
-    Ok(s)
+    b.finish().map_err(|m| ParseError::at(last_line, m))
 }
 
-fn finish_state(s: &mut Structure, coords: &mut Vec<Vec3>, line_no: usize) -> Result<(), ParseError> {
-    if coords.len() != s.atom_count() {
-        return Err(ParseError::at(
-            line_no,
-            format!("model has {} atoms, model 1 has {}", coords.len(), s.atom_count()),
-        ));
-    }
-    s.states.push(std::mem::take(coords));
-    Ok(())
-}
-
-fn push_atom(s: &mut Structure, line: &str, hetero: bool) {
-    let atom_index = s.atoms.len() as u32;
-    let atom_name = col(line, 13, 16).trim().to_owned();
-    let res_name = col(line, 18, 20).trim().to_owned();
-    let chain_id = col(line, 22, 22).trim().to_owned();
-    let seq_num = col(line, 23, 26).trim().parse().unwrap_or(0);
-    let ins_code = to_char(col(line, 27, 27));
-
-    let chain_changed = s.chains.last().is_none_or(|c| c.id != chain_id);
-    if chain_changed {
-        let start = s.residues.len() as u32;
-        s.chains.push(Chain { id: chain_id, residues: start..start });
-    }
-    let chain = (s.chains.len() - 1) as u32;
-
-    let residue_changed = chain_changed
-        || s.residues.last().is_none_or(|r| {
-            r.seq_num != seq_num || r.ins_code != ins_code || r.name != res_name
-        });
-    if residue_changed {
-        s.residues.push(Residue {
-            name: res_name,
-            seq_num,
-            ins_code,
-            chain,
-            atoms: atom_index..atom_index,
-        });
-        s.chains.last_mut().unwrap().residues.end += 1;
-    }
-    let residue = s.residues.last_mut().unwrap();
-    residue.atoms.end += 1;
-
-    let a = &mut s.atoms;
-    a.element.push(parse_element(line, &atom_name));
-    a.name.push(atom_name);
-    a.alt_loc.push(to_char(col(line, 17, 17)));
-    a.occupancy.push(col(line, 55, 60).trim().parse().unwrap_or(1.0));
-    a.b_factor.push(col(line, 61, 66).trim().parse().unwrap_or(0.0));
-    // Serials overflow 99999 in large files (hybrid-36 or "*****"); they are informational only.
-    a.serial.push(col(line, 7, 11).trim().parse().unwrap_or(-1));
-    a.hetero.push(hetero);
-    a.residue.push((s.residues.len() - 1) as u32);
+fn parse_atom(line: &str, hetero: bool) -> Result<AtomRecord<'_>, String> {
+    let name = col(line, 13, 16).trim();
+    let chain_id = col(line, 22, 22).trim();
+    Ok(AtomRecord {
+        pos: parse_coords(line)?,
+        name,
+        res_name: col(line, 18, 20).trim(),
+        chain_id,
+        label_chain_id: chain_id,
+        entity_id: None,
+        seq_num: col(line, 23, 26).trim().parse().unwrap_or(0),
+        ins_code: to_char(col(line, 27, 27)),
+        alt_loc: to_char(col(line, 17, 17)),
+        element: parse_element(line, name),
+        occupancy: col(line, 55, 60).trim().parse().unwrap_or(1.0),
+        b_factor: col(line, 61, 66).trim().parse().unwrap_or(0.0),
+        // Serials overflow 99999 in large files (hybrid-36 or "*****"); they are informational only.
+        serial: col(line, 7, 11).trim().parse().unwrap_or(-1),
+        hetero,
+    })
 }
 
 fn parse_coords(line: &str) -> Result<Vec3, String> {
@@ -121,6 +108,11 @@ fn parse_coords(line: &str) -> Result<Vec3, String> {
         raw.parse::<f32>().map_err(|_| format!("invalid {axis} coordinate {raw:?}"))
     };
     Ok([field(31, 38, "x")?, field(39, 46, "y")?, field(47, 54, "z")?])
+}
+
+/// Sequence number in columns `start..start+3` followed by an insertion code at `ins`.
+fn residue_id(line: &str, start: usize, ins: usize) -> (i32, Option<char>) {
+    (col(line, start, ins - 1).trim().parse().unwrap_or(i32::MIN), to_char(col(line, ins, ins)))
 }
 
 /// Element from columns 77-78, falling back to the atom-name convention: the element symbol is
@@ -177,5 +169,17 @@ mod tests {
         assert_eq!(col("ATOM", 13, 16), "");
         assert_eq!(col("ATOM  ", 1, 6), "ATOM  ");
         assert!(parse("ATOM      1  N", "x").is_err());
+    }
+
+    #[test]
+    fn helix_and_sheet_records() {
+        let helix = "HELIX    1  H1 ILE A    7  PRO A   19  1                                  13";
+        let sheet = "SHEET    1  S1 2 THR A   1  CYS A   4  0";
+        assert_eq!(col(helix, 20, 20), "A");
+        assert_eq!(residue_id(helix, 22, 26), (7, None));
+        assert_eq!(residue_id(helix, 34, 38), (19, None));
+        assert_eq!(col(sheet, 22, 22), "A");
+        assert_eq!(residue_id(sheet, 23, 27), (1, None));
+        assert_eq!(residue_id(sheet, 34, 38), (4, None));
     }
 }
