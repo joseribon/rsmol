@@ -1,10 +1,13 @@
 // Shared command execution and loading: the command bar, preset buttons, selection card and
 // file drops all go through here, so every action lands in one history showing the PyMOL syntax
 // behind it.
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   fetchStructure,
   loadStructure,
   runCommand,
+  saveSession,
+  sessionState,
   type CommandResult,
   type SelectionError,
   type MeasurementSummary,
@@ -80,10 +83,7 @@ export async function execute(input: string, { dryRun = false, logErrors = true 
   }
   if (dryRun) return outcome;
   if (outcome.ok) {
-    consoleState.selection = outcome.value.selection;
-    consoleState.measurements = outcome.value.measurements;
-    consoleState.canUndo = outcome.value.can_undo;
-    consoleState.canRedo = outcome.value.can_redo;
+    applyState(outcome.value);
     log({ input, output: outcome.value.message, ok: true });
   } else if (logErrors) {
     log({ input, output: outcome.error.message, ok: false });
@@ -91,10 +91,48 @@ export async function execute(input: string, { dryRun = false, logErrors = true 
   return outcome;
 }
 
-/** Loads a local file (dropped, passed on the command line, or recent). */
+const STRUCTURE_EXTENSIONS = ["cif", "mmcif", "pdb", "ent", "gz"];
+const SESSION_EXTENSION = "rsmol";
+
+/** Loads a structure or `.rsmol` session (dropped, chosen, passed on the command line, recent). */
 export async function openFile(path: string) {
   const info = await loading(() => loadStructure(path));
-  if (info) remember({ kind: "file", path, name: info.name });
+  if (!info) return;
+  const isSession = path.toLowerCase().endsWith(`.${SESSION_EXTENSION}`);
+  if (isSession) applyState(await sessionState());
+  const name = isSession ? (path.split("/").pop() ?? info.name) : info.name;
+  remember({ kind: "file", path, name });
+  log({ input: isSession ? `open ${name}` : `load ${name}`, output: `${info.atoms.toLocaleString("en-US")} atoms`, ok: true });
+}
+
+/** Asks for a structure or session file and opens it. */
+export async function chooseFile() {
+  const path = await openDialog({
+    multiple: false,
+    directory: false,
+    filters: [
+      { name: "Structures and sessions", extensions: [...STRUCTURE_EXTENSIONS, SESSION_EXTENSION] },
+      { name: "rsmol session", extensions: [SESSION_EXTENSION] },
+    ],
+  });
+  if (typeof path === "string") await openFile(path);
+}
+
+/** Asks where to save, then writes the session there. */
+export async function chooseSaveLocation() {
+  if (!consoleState.structure) return;
+  const path = await saveDialog({
+    defaultPath: `${consoleState.structure.name}.${SESSION_EXTENSION}`,
+    filters: [{ name: "rsmol session", extensions: [SESSION_EXTENSION] }],
+  });
+  if (!path) return;
+  try {
+    const message = await saveSession(path);
+    log({ input: "save session", output: message, ok: true });
+    remember({ kind: "file", path, name: path.split("/").pop() ?? path });
+  } catch (e) {
+    log({ input: "save session", output: String(e), ok: false });
+  }
 }
 
 async function fetchEntry(id: string): Promise<Outcome> {
@@ -133,6 +171,13 @@ async function loading(load: () => Promise<StructureInfo>): Promise<StructureInf
   } finally {
     consoleState.loading = false;
   }
+}
+
+function applyState(r: CommandResult) {
+  consoleState.selection = r.selection;
+  consoleState.measurements = r.measurements;
+  consoleState.canUndo = r.can_undo;
+  consoleState.canRedo = r.can_redo;
 }
 
 /** A result for actions handled in the UI (fetch), with no session state attached. */

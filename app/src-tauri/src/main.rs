@@ -11,7 +11,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use rsmol_core::session::{Effect, PRESETS, Session};
+use rsmol_core::session::{Effect, PRESETS, Session, Source};
+use rsmol_core::session_file::CameraState;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use viewport::{CameraAction, Msg};
@@ -84,13 +85,27 @@ fn is_pdb_id(id: &str) -> bool {
     id.len() == 4 && id.starts_with(|c: char| c.is_ascii_digit()) && id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
+/// Loads a structure file, or restores a `.rsmol` session (display, selections, measurements
+/// and camera included).
 async fn load(path: PathBuf, viewport: &Viewport, session: &Mutex<Session>) -> Result<StructureInfo, String> {
     let start = Instant::now();
-    let parse_path = path.clone();
-    let structure = tauri::async_runtime::spawn_blocking(move || rsmol_core::io::read(&parse_path))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+    let is_session = path.extension().is_some_and(|e| e.eq_ignore_ascii_case(rsmol_core::session_file::EXTENSION));
+    let read_path = path.clone();
+    let (loaded, camera) = tauri::async_runtime::spawn_blocking(move || -> Result<(Session, Option<CameraState>), String> {
+        let bytes = std::fs::read(&read_path).map_err(|e| format!("{}: {e}", read_path.display()))?;
+        if is_session {
+            return Session::open(&bytes);
+        }
+        let structure = rsmol_core::io::parse_bytes(&bytes, &file_name).map_err(|e| e.to_string())?;
+        let mut s = Session::default();
+        s.load_with_source(Arc::new(structure), Source { file_name, data: Arc::new(bytes) });
+        Ok((s, None))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let structure = loaded.structure.clone().expect("loading sets the structure");
     let chains: BTreeSet<_> = structure.chains.iter().map(|c| c.id.clone()).collect();
     let info = StructureInfo {
         name: structure.name.clone(),
@@ -101,14 +116,43 @@ async fn load(path: PathBuf, viewport: &Viewport, session: &Mutex<Session>) -> R
         states: structure.state_count(),
         parse_ms: start.elapsed().as_secs_f64() * 1e3,
     };
-    let structure = Arc::new(structure);
-    let display = {
-        let mut session = session.lock().unwrap();
-        session.load(structure.clone());
-        session.display.clone().expect("load sets the display")
-    };
+    let display = loaded.display.clone().expect("loading sets the display");
+    let measurements = loaded.measurements.clone();
+    let highlight = loaded.named.get("sele").map(|set| set.iter().collect()).unwrap_or_default();
+    *session.lock().unwrap() = loaded;
     viewport.send(Msg::Load(structure, display))?;
+    viewport.send(Msg::Measurements(measurements))?;
+    viewport.send(Msg::Highlight(highlight))?;
+    if let Some(camera) = camera {
+        viewport.send(Msg::SetCamera(camera))?;
+    }
     Ok(info)
+}
+
+/// Saves the session (structure, display, selections, measurements, camera) to `path`.
+#[tauri::command]
+async fn save_session(path: String, viewport: State<'_, Viewport>, session: State<'_, Mutex<Session>>) -> Result<String, String> {
+    let (reply, answer) = std::sync::mpsc::channel();
+    viewport.send(Msg::GetCamera(reply))?;
+    let camera = tauri::async_runtime::spawn_blocking(move || answer.recv_timeout(std::time::Duration::from_secs(1)).ok())
+        .await
+        .map_err(|e| e.to_string())?;
+    let bytes = session.lock().unwrap().save(camera)?;
+    let mut path = PathBuf::from(path);
+    if path.extension().is_none() {
+        path.set_extension(rsmol_core::session_file::EXTENSION);
+    }
+    // Write then rename, so a failed save never truncates an existing session.
+    let partial = path.with_extension("rsmol.partial");
+    std::fs::write(&partial, &bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&partial, &path).map_err(|e| e.to_string())?;
+    Ok(format!("saved {} ({:.1} MB)", path.display(), bytes.len() as f64 / 1e6))
+}
+
+/// The session state the UI mirrors (selection, measurements, undo), e.g. after opening a session.
+#[tauri::command]
+fn session_state(session: State<'_, Mutex<Session>>) -> CommandResult {
+    state_result(&session.lock().unwrap(), String::new(), None, None)
 }
 
 #[tauri::command]
@@ -228,21 +272,25 @@ fn run_command(
         };
         let _ = viewport.send(msg);
     }
+    Ok(state_result(&session, outcome.message, outcome.canonical, outcome.atoms))
+}
+
+fn state_result(session: &Session, message: String, canonical: Option<String>, atoms: Option<usize>) -> CommandResult {
     let selection = session.named.get("sele").zip(session.structure.as_ref()).map(|(set, s)| SelectionSummary {
         atoms: set.count(),
         residues: set.iter().map(|i| s.atoms.residue[i]).collect::<BTreeSet<_>>().len(),
     });
     let measurements =
         session.measurements.iter().map(|m| MeasurementSummary { name: m.name.clone(), label: m.label() }).collect();
-    Ok(CommandResult {
-        message: outcome.message,
-        canonical: outcome.canonical,
-        atoms: outcome.atoms,
+    CommandResult {
+        message,
+        canonical,
+        atoms,
         selection,
         measurements,
         can_undo: session.can_undo(),
         can_redo: session.can_redo(),
-    })
+    }
 }
 
 /// A structure path passed on the command line, if any.
@@ -253,6 +301,7 @@ fn startup_file() -> Option<String> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let window = app.get_webview_window("main").ok_or("main window missing")?;
             let tx = viewport::spawn(&window, app.handle().clone())?;
@@ -266,7 +315,8 @@ fn main() {
             app.manage(Mutex::new(Session::default()));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![load_structure, fetch_structure, camera, pick, presets, run_command, startup_file])
+        .invoke_handler(tauri::generate_handler![load_structure, fetch_structure, save_session, session_state, camera, pick, presets, run_command,
+            startup_file])
         .run(tauri::generate_context!())
         .expect("error while running rsmol");
 }

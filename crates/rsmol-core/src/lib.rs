@@ -12,6 +12,7 @@ pub mod io;
 pub mod measure;
 pub mod select;
 pub mod session;
+pub mod session_file;
 pub mod spatial;
 pub mod surface;
 mod structure;

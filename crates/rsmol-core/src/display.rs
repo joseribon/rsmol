@@ -22,6 +22,15 @@ impl Reps {
     pub const SURFACE: Reps = Reps(8);
     pub const ALL: Reps = Reps(15);
 
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Unknown bits (from a newer file format) are dropped.
+    pub fn from_bits(bits: u8) -> Reps {
+        Reps(bits & Reps::ALL.0)
+    }
+
     pub fn contains(self, other: Reps) -> bool {
         self.0 & other.0 == other.0
     }

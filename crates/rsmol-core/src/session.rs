@@ -39,9 +39,17 @@ pub const PRESETS: &[(&str, &str)] = &[
     ("Spheres", "hide everything; show spheres, not solvent"),
 ];
 
+/// The file a structure was read from, kept so sessions can embed it.
+#[derive(Clone, Debug)]
+pub struct Source {
+    pub file_name: String,
+    pub data: Arc<Vec<u8>>,
+}
+
 #[derive(Default)]
 pub struct Session {
     pub structure: Option<Arc<Structure>>,
+    pub source: Option<Source>,
     pub display: Option<Display>,
     pub named: HashMap<String, AtomSet>,
     pub measurements: Vec<Measurement>,
@@ -264,8 +272,15 @@ fn split_commands(text: &str) -> impl Iterator<Item = (&str, usize)> {
 }
 
 impl Session {
+    /// Loads a structure read from `source`, so the session can later be saved.
+    pub fn load_with_source(&mut self, structure: Arc<Structure>, source: Source) {
+        self.load(structure);
+        self.source = Some(source);
+    }
+
     /// Loads a structure with the default display and no named selections.
     pub fn load(&mut self, structure: Arc<Structure>) {
+        self.source = None;
         self.display = Some(Display::default_for(&structure));
         self.structure = Some(structure);
         self.named.clear();

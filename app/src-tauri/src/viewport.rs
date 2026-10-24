@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use rsmol_core::Structure;
 use rsmol_core::display::Display;
 use rsmol_core::measure::Measurement;
+use rsmol_core::session_file::CameraState;
 use rsmol_render::{Camera, Renderer};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, WebviewWindow};
@@ -41,6 +42,10 @@ pub enum Msg {
     Focus(Option<Vec<usize>>),
     /// Measurements to draw; their labels are reported to the UI after every frame.
     Measurements(Vec<Measurement>),
+    /// The current camera, for saving sessions.
+    GetCamera(Sender<CameraState>),
+    /// Restore a saved camera (after `Load`, which sets the scene bounds).
+    SetCamera(CameraState),
     /// Which atom is drawn at this physical pixel; answered from the latest frame.
     Pick { x: u32, y: u32, reply: Sender<Option<usize>> },
 }
@@ -212,6 +217,21 @@ impl ViewportState {
                 self.measurements.clear();
                 self.structure = Some(structure);
                 self.fit_camera();
+            }
+            Msg::GetCamera(reply) => {
+                let c = &self.camera;
+                let _ = reply.send(CameraState {
+                    target: c.target.into(),
+                    distance: c.distance,
+                    rotation: c.rotation.into(),
+                    fov_y: c.fov_y,
+                });
+            }
+            Msg::SetCamera(state) => {
+                self.camera.target = state.target.into();
+                self.camera.distance = state.distance;
+                self.camera.rotation = glam::Quat::from_array(state.rotation).normalize();
+                self.camera.fov_y = state.fov_y;
             }
             Msg::Measurements(measurements) => {
                 let coords = self.structure.as_ref().and_then(|s| s.coords(0)).unwrap_or_default();

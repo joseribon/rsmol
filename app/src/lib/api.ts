@@ -84,3 +84,7 @@ export const pick = (x: number, y: number) =>
 export const runCommand = (text: string, dryRun: boolean) =>
   invoke<CommandResult>("run_command", { text, dryRun });
 export const startupFile = () => invoke<string | null>("startup_file");
+/** Saves the session to `path`; resolves to a status message. */
+export const saveSession = (path: string) => invoke<string>("save_session", { path });
+/** Selection, measurements and undo state, e.g. after a session file opens. */
+export const sessionState = () => invoke<CommandResult>("session_state");

@@ -3,7 +3,16 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { presets, startupFile, type FrameStats, type Preset } from "./lib/api";
-  import { consoleState, execute, openFile, recentLabel, reopen, toggleMeasuring } from "./lib/console.svelte";
+  import {
+    chooseFile,
+    chooseSaveLocation,
+    consoleState,
+    execute,
+    openFile,
+    recentLabel,
+    reopen,
+    toggleMeasuring,
+  } from "./lib/console.svelte";
   import { SCHEMES } from "./lib/palette";
   import Viewport from "./lib/Viewport.svelte";
   import CommandBar from "./lib/CommandBar.svelte";
@@ -35,8 +44,20 @@
   }
 
   // M toggles the measure tool and Escape leaves it, unless focus is in a text field.
-  // ⌘Z / ⇧⌘Z undo and redo, except in the command bar, where they edit the text.
+  // ⌘O / ⌘S work everywhere; ⌘Z / ⇧⌘Z undo and redo, except in the command bar, where they
+  // edit the text.
   function onkeydown(e: KeyboardEvent) {
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && e.key.toLowerCase() === "o") {
+      e.preventDefault();
+      chooseFile();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      chooseSaveLocation();
+      return;
+    }
     if (e.target instanceof HTMLInputElement || !consoleState.structure) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
       e.preventDefault();
@@ -93,6 +114,12 @@
         </button>
       </div>
     {/if}
+    <button class="tool panel" title="Save session (⌘S)" onclick={chooseSaveLocation}>
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+        <path d="M2.5 2.5h7l2 2v7h-9z M4.5 2.5v3h4v-3 M4.5 11.5v-3.5h5v3.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+      </svg>
+      Save
+    </button>
     <button
       class="tool panel"
       class:active={consoleState.measuring !== null}
@@ -182,7 +209,8 @@
         Loading…
       {:else}
         <strong>Drop a structure file</strong>
-        <span>.cif · .pdb · .gz — or type <code class="mono">fetch 1hsg</code></span>
+        <span>.cif · .pdb · .gz · .rsmol — or type <code class="mono">fetch 1hsg</code></span>
+        <button class="open" onclick={chooseFile}>Open… <span class="faint">⌘O</span></button>
         {#if !dropping}
           <div class="starts">
             {#if consoleState.recent.length}
@@ -448,6 +476,19 @@
     display: grid;
     place-items: center;
     pointer-events: none;
+  }
+  .open {
+    margin-top: 10px;
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text);
+    pointer-events: auto;
+  }
+  .open:hover {
+    border-color: var(--accent);
+    background: rgba(95, 186, 168, 0.12);
   }
   .starts {
     margin-top: 14px;
