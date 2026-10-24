@@ -135,6 +135,13 @@ impl Structure {
         &self.chains[self.residue_of(atom).chain as usize]
     }
 
+    /// Whether residue `r` is water, by entity type or by the common residue names.
+    pub fn is_water(&self, r: usize) -> bool {
+        let residue = &self.residues[r];
+        let entity = self.chains[residue.chain as usize].entity.map(|e| self.entities[e as usize].kind);
+        entity == Some(EntityKind::Water) || matches!(residue.name.as_str(), "HOH" | "WAT" | "DOD" | "H2O" | "TIP3")
+    }
+
     /// Axis-aligned bounding box of a state, or `None` if it has no atoms.
     pub fn bounds(&self, state: usize) -> Option<(Vec3, Vec3)> {
         let coords = self.coords(state)?;

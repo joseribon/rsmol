@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use atoms::{SphereInstance, StickInstance};
 use bytemuck::{Pod, Zeroable};
-use rsmol_core::{EntityKind, Structure, backbone};
+use rsmol_core::{Structure, backbone};
 use wgpu::util::DeviceExt;
 
 pub use camera::Camera;
@@ -63,12 +63,14 @@ pub struct Renderer {
     sphere_pipeline: wgpu::RenderPipeline,
     stick_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
+    highlight_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     all_spheres: Option<Instances>,
     all_sticks: StickSet,
     ligand_sticks: StickSet,
     cartoon: Option<GpuMesh>,
+    highlight: Option<Instances>,
     depth: wgpu::TextureView,
     size: (u32, u32),
     pub representation: Representation,
@@ -115,24 +117,27 @@ impl Renderer {
             immediate_size: 0,
         });
 
+        // `overlay` pipelines draw on top of the scene: no depth test or write, alpha blended.
         let pipeline = |label: &str,
                         module: &wgpu::ShaderModule,
                         buffer: wgpu::VertexBufferLayout,
-                        topology: wgpu::PrimitiveTopology| {
+                        topology: wgpu::PrimitiveTopology,
+                        overlay: bool| {
+            let constants: &[(&str, f64)] = if overlay { &[("ALPHA", 0.8)] } else { &[] };
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module,
                     entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
                     buffers: &[Some(buffer)],
                 },
                 primitive: wgpu::PrimitiveState { topology, ..Default::default() },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    depth_write_enabled: Some(!overlay),
+                    depth_compare: Some(if overlay { wgpu::CompareFunction::Always } else { wgpu::CompareFunction::Less }),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -140,8 +145,12 @@ impl Renderer {
                 fragment: Some(wgpu::FragmentState {
                     module,
                     entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(color_format.into())],
+                    compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: overlay.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                 }),
                 multiview_mask: None,
                 cache: None,
@@ -157,6 +166,18 @@ impl Renderer {
                 attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Unorm8x4],
             },
             wgpu::PrimitiveTopology::TriangleStrip,
+            false,
+        );
+        let highlight_pipeline = pipeline(
+            "selection markers",
+            &shader(device, "spheres", include_str!("sphere.wgsl")),
+            wgpu::VertexBufferLayout {
+                array_stride: size_of::<SphereInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Unorm8x4],
+            },
+            wgpu::PrimitiveTopology::TriangleStrip,
+            true,
         );
         let stick_pipeline = pipeline(
             "sticks",
@@ -169,6 +190,7 @@ impl Renderer {
                 ],
             },
             wgpu::PrimitiveTopology::TriangleStrip,
+            false,
         );
         let mesh_pipeline = pipeline(
             "mesh",
@@ -179,18 +201,21 @@ impl Renderer {
                 attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4],
             },
             wgpu::PrimitiveTopology::TriangleList,
+            false,
         );
 
         Renderer {
             sphere_pipeline,
             stick_pipeline,
             mesh_pipeline,
+            highlight_pipeline,
             uniforms,
             bind_group,
             all_spheres: None,
             all_sticks: StickSet::default(),
             ligand_sticks: StickSet::default(),
             cartoon: None,
+            highlight: None,
             depth: create_depth(device, width, height),
             size: (width, height),
             representation: Representation::default(),
@@ -214,6 +239,7 @@ impl Renderer {
         self.all_sticks = StickSet::default();
         self.ligand_sticks = StickSet::default();
         self.cartoon = None;
+        self.highlight = None;
         let Some(coords) = structure.coords(state) else { return };
         let n = coords.len();
 
@@ -233,7 +259,7 @@ impl Renderer {
             in_trace[*r as usize] = true;
         }
         let residue_of = |i: usize| structure.atoms.residue[i] as usize;
-        let water: Vec<bool> = (0..n).map(|i| is_water(structure, residue_of(i))).collect();
+        let water: Vec<bool> = (0..n).map(|i| structure.is_water(residue_of(i))).collect();
         let ligand: Vec<bool> = (0..n).map(|i| !in_trace[residue_of(i)] && !water[i]).collect();
         let not_water: Vec<bool> = water.iter().map(|w| !w).collect();
 
@@ -264,6 +290,16 @@ impl Renderer {
                 count: mesh.indices.len() as u32,
             });
         }
+    }
+
+    /// Marks `atoms` (of the structure last passed to `set_structure`) as selected; an empty
+    /// iterator clears the markers.
+    pub fn set_highlight(&mut self, device: &wgpu::Device, coords: &[rsmol_core::Vec3], atoms: impl IntoIterator<Item = usize>) {
+        let markers: Vec<SphereInstance> = atoms
+            .into_iter()
+            .map(|i| SphereInstance { center: coords[i], radius: style::MARKER_RADIUS, color: style::SELECTION })
+            .collect();
+        self.highlight = upload_instances(device, "selection markers", &markers);
     }
 
     pub fn render(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, camera: &Camera) {
@@ -317,13 +353,13 @@ impl Renderer {
             pass.set_vertex_buffer(0, bonds.buffer.slice(..));
             pass.draw(0..4, 0..bonds.count);
         }
+        // Last, so markers stay visible inside cartoons and behind other atoms.
+        if let Some(markers) = &self.highlight {
+            pass.set_pipeline(&self.highlight_pipeline);
+            pass.set_vertex_buffer(0, markers.buffer.slice(..));
+            pass.draw(0..4, 0..markers.count);
+        }
     }
-}
-
-fn is_water(s: &Structure, residue: usize) -> bool {
-    let r = &s.residues[residue];
-    let entity = s.chains[r.chain as usize].entity.map(|e| s.entities[e as usize].kind);
-    entity == Some(EntityKind::Water) || matches!(r.name.as_str(), "HOH" | "WAT" | "DOD" | "H2O" | "TIP3")
 }
 
 fn upload_sticks(device: &wgpu::Device, label: &str, (joints, bonds): (Vec<SphereInstance>, Vec<StickInstance>)) -> StickSet {

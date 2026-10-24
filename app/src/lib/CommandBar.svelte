@@ -1,9 +1,9 @@
 <script lang="ts">
-  // PyMOL-style command line. For now it only parses selections, showing the canonical form
-  // or an error with carets under the offending text, live as you type.
-  import { parseSelection, type SelectionError } from "./api";
+  // PyMOL-style command line. While typing, each line is dry-run for live feedback (atom count,
+  // canonical selection, or an error with carets under the offending text); Enter runs it.
+  import { runCommand, type CommandResult, type SelectionError } from "./api";
 
-  type Result = { ok: true; canonical: string } | { ok: false; error: SelectionError };
+  type Result = { ok: true; value: CommandResult } | { ok: false; error: SelectionError };
 
   let text = $state("");
   let result: Result | null = $state(null);
@@ -11,10 +11,10 @@
   let historyIndex = -1;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
-  async function check(input: string): Promise<Result | null> {
+  async function run(input: string, dryRun: boolean): Promise<Result | null> {
     if (!input.trim()) return null;
     try {
-      return { ok: true, canonical: await parseSelection(input) };
+      return { ok: true, value: await runCommand(input, dryRun) };
     } catch (error) {
       return { ok: false, error: error as SelectionError };
     }
@@ -24,24 +24,25 @@
     clearTimeout(timer);
     const input = text;
     timer = setTimeout(async () => {
-      const r = await check(input);
+      const r = await run(input, true);
       if (input === text) result = r;
     }, 60);
   }
 
   async function onkeydown(e: KeyboardEvent) {
     if (e.key === "Enter" && text.trim()) {
-      const r = await check(text);
+      const input = text;
+      const r = await run(input, false);
       if (!r) return;
-      history = [
-        ...history.slice(-4),
-        r.ok
-          ? { input: text, output: `parsed as ${r.canonical}  (evaluation not wired up yet)`, ok: true }
-          : { input: text, output: r.error.message, ok: false },
-      ];
+      if (r.ok) {
+        history = [...history.slice(-4), { input, output: r.value.message, ok: true }];
+        text = "";
+        result = null;
+      } else {
+        // Keep the text so the error can be fixed in place.
+        result = r;
+      }
       historyIndex = -1;
-      text = "";
-      result = null;
     } else if (e.key === "ArrowUp" && history.length) {
       e.preventDefault();
       historyIndex = historyIndex < 0 ? history.length - 1 : Math.max(0, historyIndex - 1);
@@ -56,6 +57,9 @@
   // Carets line up with the input because both use the same monospace font and padding.
   const carets = (err: SelectionError) =>
     " ".repeat(err.start) + "^".repeat(Math.max(1, err.end - err.start));
+
+  const preview = (r: CommandResult) =>
+    r.canonical && r.atoms !== null ? `${r.atoms.toLocaleString("en-US")} atoms · ${r.canonical}` : r.message;
 </script>
 
 <div class="command panel">
@@ -67,7 +71,7 @@
     </ol>
   {/if}
   <div class="row">
-    <span class="prompt mono">sele›</span>
+    <span class="prompt mono">rsmol›</span>
     <div class="field">
       <input
         class="mono"
@@ -76,7 +80,7 @@
         {onkeydown}
         spellcheck="false"
         autocomplete="off"
-        placeholder="byres organic around 5 and not solvent"
+        placeholder="byres (organic around 5) and polymer   ·   zoom sele   ·   deselect"
       />
       {#if result && !result.ok}
         <div class="carets mono" aria-hidden="true">{carets(result.error)}</div>
@@ -85,7 +89,7 @@
   </div>
   {#if result}
     <div class="status mono" class:error={!result.ok}>
-      {result.ok ? `= ${result.canonical}` : result.error.message}
+      {result.ok ? preview(result.value) : result.error.message}
     </div>
   {/if}
 </div>

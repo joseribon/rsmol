@@ -34,5 +34,13 @@ export const loadStructure = (path: string) => invoke<StructureInfo>("load_struc
 export const camera = (action: CameraAction) => invoke<void>("camera", { action });
 export const setRepresentation = (representation: Representation) =>
   invoke<void>("set_representation", { representation });
-export const parseSelection = (text: string) => invoke<string>("parse_selection", { text });
+export interface CommandResult {
+  message: string;
+  canonical: string | null;
+  atoms: number | null;
+}
+
+/** Runs a command-bar line; `dryRun` reports what it would do without changing anything. */
+export const runCommand = (text: string, dryRun: boolean) =>
+  invoke<CommandResult>("run_command", { text, dryRun });
 export const startupFile = () => invoke<string | null>("startup_file");

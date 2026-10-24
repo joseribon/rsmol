@@ -37,6 +37,10 @@ pub fn element_color(e: Element) -> Option<[u8; 4]> {
     })
 }
 
+/// Selection markers: PyMOL's familiar pink, drawn as small overlay spheres.
+pub const SELECTION: [u8; 4] = [255, 92, 200, 255];
+pub const MARKER_RADIUS: f32 = 0.45;
+
 /// Ligand carbons: a light neutral that reads against every chain color.
 pub const LIGAND_CARBON: [u8; 4] = [214, 218, 226, 255];
 

@@ -4,6 +4,7 @@
 //! pending message before drawing one frame, so a burst of mouse events costs a single redraw
 //! and the UI thread never waits on the GPU.
 
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -45,11 +46,16 @@ impl From<RepresentationArg> for Representation {
     }
 }
 
+#[derive(Debug)]
 pub enum Msg {
     Camera(CameraAction),
     Representation(Representation),
     Resize { width: u32, height: u32 },
-    Load(Box<Structure>),
+    Load(Arc<Structure>),
+    /// Atoms to mark as selected; empty clears the markers.
+    Highlight(Vec<usize>),
+    /// Frame these atoms, or the whole structure for `None`.
+    Focus(Option<Vec<usize>>),
 }
 
 #[derive(Clone, Serialize)]
@@ -121,7 +127,7 @@ struct ViewportState {
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
     camera: Camera,
-    structure: Option<Box<Structure>>,
+    structure: Option<Arc<Structure>>,
     app: AppHandle,
     gpu: String,
     last_stats: Instant,
@@ -185,6 +191,26 @@ impl ViewportState {
                 self.renderer.set_structure(&self.device, &structure, 0);
                 self.structure = Some(structure);
                 self.fit_camera();
+            }
+            Msg::Highlight(atoms) => {
+                if let Some(coords) = self.structure.as_ref().and_then(|s| s.coords(0)) {
+                    self.renderer.set_highlight(&self.device, coords, atoms);
+                }
+            }
+            Msg::Focus(atoms) => {
+                let aspect = self.aspect();
+                match (atoms, self.structure.as_ref().and_then(|s| s.coords(0))) {
+                    (Some(atoms), Some(coords)) => {
+                        let points: Vec<_> = atoms.iter().map(|&i| coords[i]).collect();
+                        self.camera.focus(&points, aspect);
+                    }
+                    (None, Some(coords)) => {
+                        let rotation = self.camera.rotation;
+                        self.camera.fit(coords, aspect);
+                        self.camera.rotation = rotation;
+                    }
+                    _ => {}
+                }
             }
         }
     }

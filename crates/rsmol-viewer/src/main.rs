@@ -2,6 +2,7 @@
 //!
 //!   rsmol-viewer <structure.{pdb,cif}> [--repr spheres|sticks|cartoon|ligands]
 //!   rsmol-viewer <structure> --screenshot out.png [WxH]    render offscreen and exit
+//!   … --select "<selection>"                               highlight and zoom to atoms
 //!
 //! Controls: left-drag rotates, right-drag (or shift+left-drag) pans, scroll zooms,
 //! R resets the view, 1–4 switch between spheres / sticks / cartoon / cartoon + ligands.
@@ -49,6 +50,20 @@ fn main() {
         }
     };
 
+    let selection: Option<Vec<usize>> = args.iter().position(|a| a == "--select").map(|i| {
+        let text = args.get(i + 1).expect("--select needs a selection");
+        match rsmol_core::select::select(&structure, text) {
+            Ok(set) => {
+                println!("selection {text:?}: {} atoms", set.count());
+                set.iter().collect()
+            }
+            Err(e) => {
+                eprintln!("{}", e.render(text));
+                std::process::exit(2);
+            }
+        }
+    });
+
     if let Some(i) = args.iter().position(|a| a == "--screenshot") {
         let out = args.get(i + 1).expect("--screenshot needs an output path");
         let (w, h) = args
@@ -56,7 +71,7 @@ fn main() {
             .and_then(|s| s.split_once('x'))
             .map(|(w, h)| (w.parse().unwrap(), h.parse().unwrap()))
             .unwrap_or((1600, 1000));
-        pollster::block_on(screenshot(&structure, representation, out, w, h));
+        pollster::block_on(screenshot(&structure, representation, selection.as_deref(), out, w, h));
         return;
     }
 
@@ -265,7 +280,14 @@ impl FpsCounter {
 }
 
 /// Renders one frame offscreen and writes it as a PNG.
-async fn screenshot(structure: &Structure, representation: Representation, out: &str, width: u32, height: u32) {
+async fn screenshot(
+    structure: &Structure,
+    representation: Representation,
+    selection: Option<&[usize]>,
+    out: &str,
+    width: u32,
+    height: u32,
+) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = instance.request_adapter(&adapter_options(None)).await.unwrap();
     let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
@@ -289,6 +311,11 @@ async fn screenshot(structure: &Structure, representation: Representation, out: 
     let mut camera = fitted_camera(structure, width, height);
     // A slight tilt reads better than the raw file orientation.
     camera.orbit(-120.0, -60.0);
+    if let (Some(atoms), Some(coords)) = (selection, structure.coords(0)) {
+        renderer.set_highlight(&device, coords, atoms.iter().copied());
+        let points: Vec<_> = atoms.iter().map(|&i| coords[i]).collect();
+        camera.focus(&points, width as f32 / height as f32);
+    }
 
     let row_bytes = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {

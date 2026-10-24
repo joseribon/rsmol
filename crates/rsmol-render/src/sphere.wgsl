@@ -19,6 +19,9 @@ struct VsOut {
 // Quad corners for a 4-vertex triangle strip.
 const CORNERS = array<vec2<f32>, 4>(vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
 
+// Overridden to < 1 by the selection-marker pipeline, which blends over the scene.
+override ALPHA: f32 = 1.0;
+
 // Margin so the quad still covers the silhouette of off-axis spheres under perspective.
 const QUAD_SCALE: f32 = 1.15;
 
@@ -56,7 +59,7 @@ fn fs_main(in: VsOut) -> FsOut {
 
     let clip = u.proj * vec4(hit, 1.0);
     var out: FsOut;
-    out.color = vec4(shade(in.color, n, -dir), 1.0);
+    out.color = vec4(shade(in.color, n, -dir), ALPHA);
     out.depth = clip.z / clip.w;
     return out;
 }

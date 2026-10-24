@@ -43,6 +43,14 @@ impl Element {
     pub fn atomic_number(self) -> u8 {
         self.0
     }
+
+    /// Alkali, alkaline-earth, transition, lanthanide/actinide and post-transition metals.
+    pub fn is_metal(self) -> bool {
+        matches!(
+            self.0,
+            3 | 4 | 11 | 12 | 13 | 19..=31 | 37..=50 | 55..=84 | 87..=103
+        )
+    }
 }
 
 impl fmt::Display for Element {

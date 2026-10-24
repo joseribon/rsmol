@@ -72,6 +72,14 @@ impl Grid {
         }
     }
 
+    /// Whether any atom lies within `radius` of `point`; stops at the first hit.
+    pub fn any_within(&self, coords: &[Vec3], point: Vec3, radius: f32) -> bool {
+        let r2 = radius * radius;
+        let reach = (radius / self.cell).ceil() as isize;
+        self.cells_around(self.cell_coords(&point), reach)
+            .any(|c| self.cell_atoms(c).iter().any(|&a| dist2(&coords[a as usize], &point) <= r2))
+    }
+
     /// Calls `f(i, j, distance²)` once for every pair `i < j` closer than `radius`.
     pub fn pairs_within(&self, coords: &[Vec3], radius: f32, mut f: impl FnMut(u32, u32, f32)) {
         let r2 = radius * radius;
