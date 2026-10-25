@@ -76,6 +76,15 @@ export interface PickInfo {
   b_factor: number;
 }
 
+/** Camera placement, as sessions store it. */
+export interface CameraState {
+  target: [number, number, number];
+  distance: number;
+  /** Unit quaternion (x, y, z, w). */
+  rotation: [number, number, number, number];
+  fov_y: number;
+}
+
 export interface Preset {
   name: string;
   commands: string;
@@ -92,6 +101,10 @@ export const pick = (x: number, y: number) =>
 /** Runs a command-bar line; `dryRun` reports what it would do without changing anything. */
 export const runCommand = (text: string, dryRun: boolean) =>
   invoke<CommandResult>("run_command", { text, dryRun });
+/** The tooltip details for atom `index` (0-based), for viewports that pick locally. */
+export const atomDetails = (index: number) => invoke<PickInfo | null>("atom_details", { index });
+/** "native": a GPU surface under the transparent page (macOS). "web": the page draws. */
+export const viewportMode = () => invoke<"native" | "web">("viewport_mode");
 export const startupFile = () => invoke<string | null>("startup_file");
 /** Runs a Python script file, or inline code, against the live session. */
 export const runPython = (script: { path?: string; code?: string }) =>

@@ -1,13 +1,17 @@
 <script lang="ts">
-  // Measurement labels, positioned from the render thread's projected anchors each frame.
+  // Measurement labels, positioned each frame from anchors projected by the render thread
+  // (native) or the web renderer.
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import type { Label } from "./api";
+  import { webView } from "./webview.svelte";
 
-  let labels: Label[] = $state([]);
+  let nativeLabels: Label[] = $state([]);
+  // The webview viewport projects its own labels.
+  const labels = $derived(webView.active ? webView.labels : nativeLabels);
 
   onMount(() => {
-    const unlisten = listen<Label[]>("viewport-labels", (e) => (labels = e.payload));
+    const unlisten = listen<Label[]>("viewport-labels", (e) => (nativeLabels = e.payload));
     return () => unlisten.then((f) => f());
   });
 </script>
