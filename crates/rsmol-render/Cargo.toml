@@ -9,5 +9,11 @@ license.workspace = true
 rsmol-core.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.34"
-pollster = "1"
 wgpu = "30"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The browser backends: WebGPU where available, WebGL2 otherwise.
+wgpu = { version = "30", features = ["webgl"] }

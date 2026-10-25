@@ -10,6 +10,7 @@
 pub mod atoms;
 mod camera;
 pub mod cartoon;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod offscreen;
 pub mod style;
 
@@ -27,7 +28,7 @@ pub use camera::Camera;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Linear HDR scene target, so lighting is not quantized before the composite.
-const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+pub const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Per-pixel atom index + 1 (0 = background), for mouse picking.
 const ID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
 
@@ -136,6 +137,7 @@ pub struct Renderer {
     markers: Option<Instances>,
     dashes: Option<Instances>,
     targets: Targets,
+    scene_format: wgpu::TextureFormat,
     pub style: Style,
 }
 
@@ -165,6 +167,18 @@ enum Kind {
 impl Renderer {
     /// `output_format` is the format of the views later passed to `render`.
     pub fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
+        Self::with_scene_format(device, output_format, SCENE_FORMAT, width, height)
+    }
+
+    /// Like `new`, with another format for the lit scene target, for devices that cannot
+    /// render to [`SCENE_FORMAT`] (WebGL2 without float color buffers).
+    pub fn with_scene_format(
+        device: &wgpu::Device,
+        output_format: wgpu::TextureFormat,
+        scene_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
         let uniform_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -210,7 +224,16 @@ impl Renderer {
             entries: &[
                 uniform_entry(0),
                 texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(2, wgpu::TextureSampleType::Depth),
+                // Depth is read as a plain float texture through a nearest sampler: GLSL cannot
+                // `textureLoad` a depth binding, and WebGL2 treats an unsampled depth texture as
+                // incomplete (reads return 0). The values are the same either way.
+                texture_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
             ],
         });
         let layout = |bind: &wgpu::BindGroupLayout| {
@@ -230,7 +253,7 @@ impl Renderer {
             let constants: &[(&str, f64)] = if matches!(kind, Kind::Overlay) { &[("ALPHA", 0.55)] } else { &[] };
             let options = wgpu::PipelineCompilationOptions { constants, ..Default::default() };
             let (format, blend) = match kind {
-                Kind::Scene => (SCENE_FORMAT, None),
+                Kind::Scene => (scene_format, None),
                 Kind::Overlay => (output_format, Some(wgpu::BlendState::ALPHA_BLENDING)),
                 Kind::Post => (output_format, None),
             };
@@ -302,7 +325,7 @@ impl Renderer {
         let post_shader = shader(device, "composite", include_str!("post.wgsl"), false);
         let post_pipeline = pipeline("composite", &post_shader, None, TriangleList, Kind::Post);
 
-        let targets = create_targets(device, &post_layout, &post_uniforms, width, height);
+        let targets = create_targets(device, &post_layout, &post_uniforms, scene_format, width, height);
         Renderer {
             sphere_pipeline,
             stick_pipeline,
@@ -322,13 +345,14 @@ impl Renderer {
             markers: None,
             dashes: None,
             targets,
+            scene_format,
             style: Style::default(),
         }
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         if (width, height) != self.targets.size && width > 0 && height > 0 {
-            self.targets = create_targets(device, &self.post_layout, &self.post_uniforms, width, height);
+            self.targets = create_targets(device, &self.post_layout, &self.post_uniforms, self.scene_format, width, height);
         }
     }
 
@@ -561,6 +585,32 @@ impl Renderer {
     /// The atom drawn at pixel (`x`, `y`) of the last rendered frame, if any. Blocks until the
     /// GPU has copied that one pixel back.
     pub fn pick(&self, device: &wgpu::Device, queue: &wgpu::Queue, x: u32, y: u32) -> Option<usize> {
+        let buffer = self.pick_copy(device, queue, x, y)?;
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        read_pick(&buffer)
+    }
+
+    /// Like `pick`, without blocking: the browser cannot wait on the GPU, so the readback
+    /// completes on its event loop. Native callers must keep polling the device meanwhile.
+    pub fn pick_async(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        x: u32,
+        y: u32,
+    ) -> impl Future<Output = Option<usize>> + use<> {
+        let buffer = self.pick_copy(device, queue, x, y);
+        async move {
+            let buffer = buffer?;
+            let (tx, rx) = oneshot();
+            buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| tx(r.is_ok()));
+            rx.await.then(|| read_pick(&buffer)).flatten()
+        }
+    }
+
+    /// Copies the pick ID at (`x`, `y`) into a mappable buffer.
+    fn pick_copy(&self, device: &wgpu::Device, queue: &wgpu::Queue, x: u32, y: u32) -> Option<wgpu::Buffer> {
         let (width, height) = self.targets.size;
         if x >= width || y >= height {
             return None;
@@ -586,12 +636,43 @@ impl Renderer {
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
         queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
-        let data = buffer.slice(..).get_mapped_range().ok()?;
-        let id = u32::from_le_bytes(data[..4].try_into().ok()?);
-        id.checked_sub(1).map(|i| i as usize)
+        Some(buffer)
     }
+}
+
+/// Decodes a mapped pick buffer: atom index + 1, or 0 for the background.
+fn read_pick(buffer: &wgpu::Buffer) -> Option<usize> {
+    let data = buffer.slice(..).get_mapped_range().ok()?;
+    let id = u32::from_le_bytes(data[..4].try_into().ok()?);
+    id.checked_sub(1).map(|i| i as usize)
+}
+
+/// A single-value channel for wgpu callbacks, so pick results can be awaited without pulling
+/// in an async runtime.
+fn oneshot<T: Send + 'static>() -> (impl FnOnce(T) + Send + 'static, impl Future<Output = T>) {
+    use std::sync::{Arc, Mutex};
+    use std::task::{Poll, Waker};
+    type Slot<T> = Arc<Mutex<(Option<T>, Option<Waker>)>>;
+    let slot: Slot<T> = Arc::default();
+    let sender = slot.clone();
+    let send = move |value| {
+        let mut s = sender.lock().unwrap();
+        s.0 = Some(value);
+        if let Some(waker) = s.1.take() {
+            waker.wake();
+        }
+    };
+    let recv = std::future::poll_fn(move |cx| {
+        let mut s = slot.lock().unwrap();
+        match s.0.take() {
+            Some(value) => Poll::Ready(value),
+            None => {
+                s.1 = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    });
+    (send, recv)
 }
 
 /// Backbone traces cut down to runs of at least two residues shown as cartoon.
@@ -620,7 +701,14 @@ fn shown_traces(s: &Structure, state: usize, display: &Display) -> Vec<Trace> {
     out
 }
 
-fn create_targets(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniforms: &wgpu::Buffer, width: u32, height: u32) -> Targets {
+fn create_targets(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    scene_format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> Targets {
     let texture = |label, format, usage| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -634,10 +722,12 @@ fn create_targets(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniform
         })
     };
     let sampled = wgpu::TextureUsages::TEXTURE_BINDING;
-    let scene = texture("scene color", SCENE_FORMAT, sampled).create_view(&Default::default());
+    let scene = texture("scene color", scene_format, sampled).create_view(&Default::default());
     let depth = texture("depth", DEPTH_FORMAT, sampled).create_view(&Default::default());
     let ids = texture("pick ids", ID_FORMAT, wgpu::TextureUsages::COPY_SRC);
     let ids_view = ids.create_view(&Default::default());
+    // Nearest, clamped: the defaults.
+    let nearest = device.create_sampler(&wgpu::SamplerDescriptor { label: Some("depth"), ..Default::default() });
     let post_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("post"),
         layout,
@@ -645,6 +735,7 @@ fn create_targets(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniform
             wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&scene) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&nearest) },
         ],
     });
     Targets { scene, ids, ids_view, depth, post_bind_group, size: (width.max(1), height.max(1)) }

@@ -332,7 +332,7 @@ impl FpsCounter {
 
 /// Renders one frame offscreen and writes it as a PNG.
 async fn screenshot(session: &Session, view: &ViewState, out: &str, width: u32, height: u32, pick: Option<(u32, u32)>) {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance.request_adapter(&adapter_options(None)).await.unwrap();
     let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
