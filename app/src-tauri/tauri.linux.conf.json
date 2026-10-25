@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "bun run wasm && bun run dev",
+    "beforeBuildCommand": "bun run wasm && bun run build"
+  },
+  "app": {
+    "macOSPrivateApi": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "rsmol",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 640,
+        "minHeight": 420,
+        "dragDropEnabled": true,
+        "backgroundColor": "#040508"
+      }
+    ]
+  }
+}

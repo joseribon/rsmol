@@ -13,7 +13,8 @@
   color-scheme: dark;
 }
 
-/* The page must stay transparent: the molecule is drawn natively *behind* the webview. */
+/* The page must stay transparent: on macOS the molecule is drawn natively *behind* the webview
+   (elsewhere a canvas in the page draws it). */
 html,
 body {
   margin: 0;
