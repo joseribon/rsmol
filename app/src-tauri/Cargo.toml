@@ -17,14 +17,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # HTTP for `fetch`; rustls, so no system OpenSSL. Gzip bodies are handled by rsmol-core.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
-tauri = { version = "2", features = [] }
+# macos-private-api allows transparent windows on macOS (the web UI floats over the native
+# viewport); it compiles to nothing elsewhere. Keep it here, not under a macOS-only target
+# table: the Tauri CLI rewrites every `tauri` entry to match tauri.conf.json.
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 wgpu = "30"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Transparent windows, so the web UI floats over the native viewport. Other platforms draw in
-# the page and keep opaque windows.
-tauri = { version = "2", features = [] }
 # Same versions as wry, so the AppKit bindings are shared rather than duplicated.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSGraphics", "NSResponder", "NSView", "NSWindow"] }

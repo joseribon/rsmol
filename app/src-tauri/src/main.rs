@@ -326,7 +326,7 @@ fn viewport_attach(
         web.attach(channel, &session.lock().unwrap());
         return Ok(());
     }
-    let _ = (channel, gpu, session);
+    let _ = (channel, gpu, viewport, session);
     Err("the native viewport draws itself".into())
 }
 
