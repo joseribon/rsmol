@@ -106,7 +106,12 @@ impl StructureBuilder {
 
     pub fn finish(mut self) -> Result<Structure, String> {
         self.end_state()?;
-        self.assign_secondary_structure();
+        if self.ss_ranges.is_empty() {
+            // No HELIX/SHEET records or struct_conf tables, as in most predicted models.
+            crate::dss::assign(&mut self.s, 0);
+        } else {
+            self.assign_secondary_structure();
+        }
         self.s.bonds.sort_unstable();
         self.s.bonds.dedup_by_key(|b| b.atoms);
         crate::bonds::assign(&mut self.s, 0);
@@ -161,9 +166,6 @@ impl StructureBuilder {
     }
 
     fn assign_secondary_structure(&mut self) {
-        if self.ss_ranges.is_empty() {
-            return;
-        }
         let s = &mut self.s;
         // First occurrence wins: polymer residues precede ligands/waters that may reuse numbers.
         let mut index: HashMap<(&str, i32, Option<char>), usize> = HashMap::new();

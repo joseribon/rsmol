@@ -31,7 +31,7 @@ use crate::backbone;
 use crate::measure::{Measurement, MeasurementKind};
 use crate::select::{AtomSet, Evaluator, SelectionError, parse};
 use crate::superpose::{self, Transform};
-use crate::Structure;
+use crate::{SecondaryStructure, Structure};
 
 const DEFAULT_SELECTION: &str = "sele";
 
@@ -271,6 +271,7 @@ enum Command<'a> {
     Align { mobile: Arg<'a>, target: Arg<'a> },
     Alter { sel: Arg<'a>, assignments: Vec<(AtomField, Arg<'a>)> },
     Enable { name: Arg<'a>, enabled: bool },
+    Dss { sel: Option<Arg<'a>> },
 }
 
 /// A selection argument and its byte offset in the full command line.
@@ -357,6 +358,7 @@ fn parse_command(text: &str, offset: usize) -> Result<Command<'_>, SelectionErro
         }
         "deselect" => Command::Deselect,
         "zoom" => Command::Zoom { sel: (!args.text.is_empty()).then_some(args) },
+        "dss" => Command::Dss { sel: (!args.text.is_empty()).then_some(args) },
         "show" => {
             let (reps, sel) = rep_and_sel("show")?;
             Command::Show { reps, sel }
@@ -657,18 +659,61 @@ impl Session {
             }
         }
         for (k, structure) in edited.into_iter().enumerate() {
-            let Some(structure) = structure else { continue };
-            let object = &mut self.objects[k];
-            // The embedded file must now carry the edits; its coordinates already include
-            // `transform`, so that resets to identity.
-            let all: Vec<usize> = (0..structure.atom_count()).collect();
-            let data = crate::io::write::to_mmcif(&structure, &all).into_bytes();
-            object.source = Some(Source { file_name: format!("{}.cif", object.name), data: Arc::new(data) });
-            object.transform = Transform::IDENTITY;
-            object.structure = Arc::new(structure);
+            if let Some(structure) = structure {
+                self.replace_structure(k, structure);
+            }
         }
         self.rebuild_scene();
         Ok(vec![Effect::Scene { refit: false }, Effect::Display])
+    }
+
+    /// Swaps in an edited structure for object `k`. The embedded file must now carry the edits;
+    /// its coordinates already include `transform`, so that resets to identity. The caller
+    /// rebuilds the scene.
+    fn replace_structure(&mut self, k: usize, structure: Structure) {
+        let object = &mut self.objects[k];
+        let all: Vec<usize> = (0..structure.atom_count()).collect();
+        let data = crate::io::write::to_mmcif(&structure, &all).into_bytes();
+        object.source = Some(Source { file_name: format!("{}.cif", object.name), data: Arc::new(data) });
+        object.transform = Transform::IDENTITY;
+        object.structure = Arc::new(structure);
+    }
+
+    /// Recomputes secondary structure from the coordinates for the residues with an atom in
+    /// `set`, and returns how many residues are now (helix, sheet). Objects whose assignment
+    /// changes are re-embedded, so saved sessions keep it.
+    fn apply_dss(&mut self, set: &AtomSet, dry_run: bool) -> (usize, usize) {
+        let ranges = self.object_ranges();
+        let (mut helix, mut sheet) = (0, 0);
+        let mut changed = false;
+        for (k, (_, range)) in ranges.iter().enumerate() {
+            let s = &self.objects[k].structure;
+            let mut picked = vec![false; s.residues.len()];
+            for i in set.iter().filter(|i| range.contains(i)) {
+                picked[s.atoms.residue[i - range.start] as usize] = true;
+            }
+            if !picked.contains(&true) {
+                continue;
+            }
+            let computed = crate::dss::compute(s, 0);
+            let mut edited = (**s).clone();
+            for (r, residue) in edited.residues.iter_mut().enumerate().filter(|(r, _)| picked[*r]) {
+                residue.ss = computed[r];
+                match computed[r] {
+                    SecondaryStructure::Helix => helix += 1,
+                    SecondaryStructure::Sheet => sheet += 1,
+                    SecondaryStructure::Loop => {}
+                }
+            }
+            if !dry_run && edited.residues != s.residues {
+                self.replace_structure(k, edited);
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild_scene();
+        }
+        (helix, sheet)
     }
 
     /// Properties of the selected atoms, in atom order.
@@ -1045,6 +1090,13 @@ impl Session {
                 (format!("{verb} {}", if all { "all objects".to_owned() } else { name.text.to_owned() }), None, set,
                     if dry_run { Vec::new() } else { vec![Effect::Display] })
             }
+            Command::Dss { sel } => {
+                let (set, canonical) = evaluate(sel)?;
+                let (helix, sheet) = self.apply_dss(&set, dry_run);
+                let message = format!("assign secondary structure: {helix} helix and {sheet} sheet residues");
+                let effects = if dry_run { Vec::new() } else { vec![Effect::Scene { refit: false }, Effect::Display] };
+                (message, canonical, set, effects)
+            }
             Command::Deselect | Command::Delete { .. } => unreachable!("handled above"),
         };
         Ok(Outcome { message, canonical, atoms: Some(set.count()), effects, values })
@@ -1377,6 +1429,40 @@ mod object_tests {
         // A second copy of the same file gets a unique name.
         let (name, _) = s.add_object(Arc::new(traces()), None);
         assert_eq!(name, "traces_2");
+    }
+
+    #[test]
+    fn dss_reassigns_selected_residues_and_undoes() {
+        let mpro = crate::io::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/6LU7.cif.gz")).unwrap();
+        let mut s = Session::default();
+        s.add_object(Arc::new(mpro), None);
+        let helix = |s: &mut Session| s.run("ss H", true).unwrap().atoms.unwrap();
+        let before = helix(&mut s);
+
+        s.objects[0].structure = Arc::new({
+            let mut st = (*s.objects[0].structure).clone();
+            st.residues.iter_mut().for_each(|r| r.ss = SecondaryStructure::Loop);
+            st
+        });
+        s.rebuild_scene();
+        assert_eq!(helix(&mut s), 0);
+
+        // Only residues in the selection change.
+        let out = s.run("dss resi 1-100", false).unwrap();
+        assert!(out.message.starts_with("assign secondary structure: "), "{}", out.message);
+        assert_eq!(out.effects, [Effect::Scene { refit: false }, Effect::Display]);
+        assert!(s.run("ss H+S and resi 101-306", true).unwrap().atoms == Some(0));
+        let partial = helix(&mut s);
+        assert!(partial > 0);
+
+        s.run("dss", false).unwrap();
+        let all = helix(&mut s);
+        assert!(all > partial && all.abs_diff(before) < before / 20, "{all} vs {before}");
+        // Sessions re-read the embedded file, which now carries the assignment.
+        assert!(std::str::from_utf8(&s.objects[0].source.as_ref().unwrap().data).unwrap().contains("_struct_conf"));
+
+        s.run("undo", false).unwrap();
+        assert_eq!(helix(&mut s), partial);
     }
 
     #[test]
