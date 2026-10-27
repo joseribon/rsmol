@@ -7,6 +7,7 @@ pub mod backbone;
 pub mod bonds;
 pub mod color;
 pub mod display;
+pub mod dss;
 mod element;
 pub mod io;
 pub mod measure;

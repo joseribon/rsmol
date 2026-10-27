@@ -76,6 +76,13 @@ class CmdTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             cmd.alter("index 1", "elem = 'Qq'")
 
+    def test_dss(self):
+        cmd.load(os.path.join(DATA, "6LU7.cif.gz"), "mpro")
+        helix = cmd.count_atoms("mpro and ss H")
+        cmd.dss("mpro")
+        self.assertGreater(cmd.count_atoms("mpro and ss S"), 0)
+        self.assertLess(abs(cmd.count_atoms("mpro and ss H") - helix), helix // 20)
+
     def test_export_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             for ext in ("pdb", "cif"):

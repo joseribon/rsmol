@@ -154,6 +154,13 @@ def disable(name: str = "all") -> None:
     do(f"disable {name}")
 
 
+def dss(selection: str = "all") -> None:
+    """Assigns secondary structure (helix, sheet, loop) from the backbone geometry, as PyMOL's
+    dss does. Files without HELIX/SHEET records or struct_conf tables, such as most predicted
+    models, get this automatically when loaded."""
+    do("dss" if selection == "all" else f"dss {selection}")
+
+
 # --- selections ------------------------------------------------------------------------------
 
 
