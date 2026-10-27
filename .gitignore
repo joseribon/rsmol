@@ -6,3 +6,4 @@ app/src-tauri/gen/
 __pycache__/
 *.so
 .venv/
+app/src/lib/wasm/

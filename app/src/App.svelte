@@ -21,13 +21,17 @@
   import SelectionCard from "./lib/SelectionCard.svelte";
   import AtomTooltip from "./lib/AtomTooltip.svelte";
   import MeasurementLabels from "./lib/MeasurementLabels.svelte";
+  import { webView } from "./lib/webview.svelte";
 
   // The scene, as the panel shows it: one object by name, several as a count.
   const objects = $derived(consoleState.objects);
   const info = $derived(objects.length ? consoleState.structure : null);
   const sceneName = $derived(objects.length === 1 ? objects[0].name : `${objects.length} objects`);
   const total = (key: "atoms" | "residues") => objects.reduce((n, o) => n + o[key], 0);
-  let stats: FrameStats | null = $state(null);
+  let nativeStats: FrameStats | null = $state(null);
+  const stats = $derived(webView.active ? webView.stats : nativeStats);
+  // The macOS title bar overlays the content with its traffic lights; elsewhere it is a normal one.
+  const macos = navigator.userAgent.includes("Mac");
   let dropping = $state(false);
   const EXAMPLES = [
     { id: "1HSG", hint: "HIV protease with indinavir" },
@@ -80,7 +84,7 @@
       if (path) openFile(path);
     });
     const unlisten = [
-      listen<FrameStats>("viewport-frame", (e) => (stats = e.payload)),
+      listen<FrameStats>("viewport-frame", (e) => (nativeStats = e.payload)),
       // Scripts change the session from outside the UI; mirror it as they go.
       listen("session-changed", () => refreshState()),
       listen<string>("python-output", (e) => scriptOutput(e.payload)),
@@ -102,7 +106,7 @@
 <MeasurementLabels />
 <AtomTooltip />
 
-<header class="titlebar" data-tauri-drag-region>
+<header class="titlebar" class:macos data-tauri-drag-region>
   <span class="brand" data-tauri-drag-region>rsmol</span>
   {#if info}<span class="crumb" data-tauri-drag-region>{objects.map((o) => o.name).join(" + ")}</span>{/if}
 </header>
@@ -307,6 +311,9 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    padding-left: 16px;
+  }
+  .titlebar.macos {
     /* Clear the macOS traffic lights drawn over the content by the Overlay title bar. */
     padding-left: 84px;
   }

@@ -18,7 +18,8 @@ struct Post {
 
 @group(0) @binding(0) var<uniform> p: Post;
 @group(0) @binding(1) var scene: texture_2d<f32>;
-@group(0) @binding(2) var depth: texture_depth_2d;
+@group(0) @binding(2) var depth: texture_2d<f32>;
+@group(0) @binding(3) var nearest: sampler;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -31,14 +32,20 @@ fn clamp_px(px: vec2<i32>) -> vec2<i32> {
     return clamp(px, vec2(0), vec2<i32>(p.resolution) - 1);
 }
 
+// Depth at a pixel center. Sampled rather than loaded so it also works on WebGL2 (see the
+// bind group layout); a nearest sample at the texel center returns exactly that texel.
+fn load_depth(q: vec2<i32>) -> f32 {
+    return textureSampleLevel(depth, nearest, (vec2<f32>(q) + 0.5) / p.resolution, 0.0).r;
+}
+
 fn depth_at(px: vec2<i32>) -> f32 {
-    return textureLoad(depth, clamp_px(px), 0);
+    return load_depth(clamp_px(px));
 }
 
 fn view_pos(px: vec2<i32>) -> vec3<f32> {
     let q = clamp_px(px);
     let uv = (vec2<f32>(q) + 0.5) / p.resolution;
-    let ndc = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, textureLoad(depth, q, 0), 1.0);
+    let ndc = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, load_depth(q), 1.0);
     let v = p.inv_proj * ndc;
     return v.xyz / v.w;
 }

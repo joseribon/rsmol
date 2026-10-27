@@ -6,6 +6,8 @@ mod macos;
 #[cfg(unix)]
 mod scripting;
 mod viewport;
+#[cfg(not(target_os = "macos"))]
+mod web;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -19,11 +21,24 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use viewport::{CameraAction, Msg};
 
-pub(crate) struct Viewport(Sender<Msg>);
+pub(crate) enum Viewport {
+    /// A wgpu surface under the transparent webview, drawn by the render thread (macOS).
+    Native(Sender<Msg>),
+    /// Drawn by the webview itself, in a canvas (Linux, Windows).
+    #[cfg(not(target_os = "macos"))]
+    Web(web::WebViewport),
+}
 
 impl Viewport {
     pub(crate) fn send(&self, msg: Msg) -> Result<(), String> {
-        self.0.send(msg).map_err(|_| "viewport thread has stopped".to_owned())
+        match self {
+            Viewport::Native(tx) => tx.send(msg).map_err(|_| "viewport thread has stopped".to_owned()),
+            #[cfg(not(target_os = "macos"))]
+            Viewport::Web(web) => {
+                web.send(msg);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -171,6 +186,11 @@ pub(crate) fn apply_effects(session: &Session, effects: Vec<Effect>, viewport: &
             },
             Effect::Measurements => Msg::Measurements(session.measurements.clone()),
             Effect::Scene { refit } => {
+                #[cfg(not(target_os = "macos"))]
+                if let Viewport::Web(web) = viewport {
+                    web.scene(session, refit);
+                    continue;
+                }
                 Msg::Scene { structure: session.structure.clone(), display: session.render_display(), refit }
             }
         };
@@ -258,13 +278,20 @@ async fn pick(
     let atom = tauri::async_runtime::spawn_blocking(move || answer.recv_timeout(std::time::Duration::from_millis(250)).ok().flatten())
         .await
         .map_err(|e| e.to_string())?;
-    let session = session.lock().unwrap();
-    let (Some(i), Some(s)) = (atom, session.structure.as_ref()) else { return Ok(None) };
-    if i >= s.atom_count() {
-        return Ok(None);
-    }
+    Ok(atom.and_then(|i| pick_info(&session.lock().unwrap(), i)))
+}
+
+/// What the tooltip shows for atom `index` (0-based), as `pick` reports it. The webview
+/// viewport picks locally and asks for this.
+#[tauri::command]
+fn atom_details(index: usize, session: State<'_, Mutex<Session>>) -> Option<PickInfo> {
+    pick_info(&session.lock().unwrap(), index)
+}
+
+fn pick_info(session: &Session, i: usize) -> Option<PickInfo> {
+    let s = session.structure.as_ref().filter(|s| i < s.atom_count())?;
     let r = s.residue_of(i);
-    Ok(Some(PickInfo {
+    Some(PickInfo {
         index: i + 1,
         label: s.atom_label(i),
         chain: s.chain_of(i).id.clone(),
@@ -272,7 +299,45 @@ async fn pick(
         atom: s.atoms.name[i].clone(),
         element: s.atoms.element[i].symbol().to_owned(),
         b_factor: s.atoms.b_factor[i],
-    }))
+    })
+}
+
+/// "native" (a GPU surface under the transparent webview) or "web" (the page draws).
+#[tauri::command]
+fn viewport_mode(viewport: State<'_, Viewport>) -> &'static str {
+    match *viewport {
+        Viewport::Native(_) => "native",
+        #[cfg(not(target_os = "macos"))]
+        Viewport::Web(_) => "web",
+    }
+}
+
+/// Web mode: the page's channel for scene and view updates; the session is replayed onto it.
+#[tauri::command]
+fn viewport_attach(
+    channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    gpu: String,
+    viewport: State<'_, Viewport>,
+    session: State<'_, Mutex<Session>>,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    if let Viewport::Web(web) = &*viewport {
+        eprintln!("viewport: {gpu} (webview)");
+        web.attach(channel, &session.lock().unwrap());
+        return Ok(());
+    }
+    let _ = (channel, gpu, viewport, session);
+    Err("the native viewport draws itself".into())
+}
+
+/// Web mode: the page reports its camera as it moves, so sessions save it without asking.
+#[tauri::command]
+fn viewport_camera(state: CameraState, viewport: State<'_, Viewport>) {
+    #[cfg(not(target_os = "macos"))]
+    if let Viewport::Web(web) = &*viewport {
+        web.set_camera(state);
+    }
+    let _ = (state, viewport);
 }
 
 #[derive(Serialize)]
@@ -440,6 +505,13 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            app.manage(Mutex::new(Session::default()));
+            // Off macOS the page draws (RSMOL_VIEWPORT=native tries the native surface instead).
+            #[cfg(not(target_os = "macos"))]
+            if std::env::var("RSMOL_VIEWPORT").as_deref() != Ok("native") {
+                app.manage(Viewport::Web(Default::default()));
+                return Ok(());
+            }
             let window = app.get_webview_window("main").ok_or("main window missing")?;
             let tx = viewport::spawn(&window, app.handle().clone())?;
             let resize_tx = tx.clone();
@@ -448,12 +520,11 @@ fn main() {
                     let _ = resize_tx.send(Msg::Resize { width: size.width, height: size.height });
                 }
             });
-            app.manage(Viewport(tx));
-            app.manage(Mutex::new(Session::default()));
+            app.manage(Viewport::Native(tx));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![load_structure, fetch_structure, save_session, session_state, camera, pick, presets, run_command,
-            run_python, startup_file])
+            run_python, startup_file, atom_details, viewport_mode, viewport_attach, viewport_camera])
         .run(tauri::generate_context!())
         .expect("error while running rsmol");
 }

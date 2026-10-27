@@ -1,6 +1,6 @@
 [package]
 name = "rsmol-app"
-description = "rsmol desktop app: native wgpu viewport under a transparent webview UI"
+description = "rsmol desktop app: wgpu viewport under (macOS) or inside (Linux, Windows) the webview UI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,7 +17,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # HTTP for `fetch`; rustls, so no system OpenSSL. Gzip bodies are handled by rsmol-core.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
-# macos-private-api is required for transparent windows on macOS.
+# macos-private-api allows transparent windows on macOS (the web UI floats over the native
+# viewport); it compiles to nothing elsewhere. Keep it here, not under a macOS-only target
+# table: the Tauri CLI rewrites every `tauri` entry to match tauri.conf.json.
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 wgpu = "30"

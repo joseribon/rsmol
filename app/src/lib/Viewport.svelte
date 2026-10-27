@@ -1,11 +1,27 @@
 <script lang="ts">
-  // Transparent input layer over the native viewport. Drags orbit/pan the camera (deltas are
-  // batched per animation frame); hovering shows the atom under the pointer; clicks select.
-  import { onMount } from "svelte";
-  import { camera, pick } from "./api";
+  // Input layer over the viewport. Drags orbit/pan the camera (deltas are batched per animation
+  // frame); hovering shows the atom under the pointer; clicks select. On macOS ("native") the
+  // GPU draws under this transparent layer; elsewhere ("web") a canvas inside it does.
+  import { onMount, tick } from "svelte";
+  import { atomDetails, camera, pick, viewportMode, type CameraAction, type PickInfo } from "./api";
   import { consoleState, execute, measurePick } from "./console.svelte";
+  import { camera as webCamera, pickAtom, startWebViewport } from "./webview.svelte";
 
   let el: HTMLDivElement;
+  let canvas: HTMLCanvasElement | undefined = $state();
+  let kind: "native" | "web" | null = $state(null);
+
+  function moveCamera(action: CameraAction) {
+    if (kind === "web") webCamera(action);
+    else camera(action);
+  }
+
+  /** The atom under a point in CSS pixels. */
+  async function pickAt(x: number, y: number): Promise<PickInfo | null> {
+    if (kind !== "web") return pick(x, y);
+    const atom = await pickAtom(x, y);
+    return atom === null ? null : atomDetails(atom);
+  }
   let mode: "orbit" | "pan" | null = $state(null);
   const pending = { orbit: [0, 0], pan: [0, 0], zoom: 1 };
   let scheduled = false;
@@ -16,9 +32,9 @@
   function flush() {
     scheduled = false;
     const { orbit, pan, zoom } = pending;
-    if (orbit[0] || orbit[1]) camera({ kind: "orbit", dx: orbit[0], dy: orbit[1] });
-    if (pan[0] || pan[1]) camera({ kind: "pan", dx: pan[0], dy: pan[1], height: el.clientHeight });
-    if (zoom !== 1) camera({ kind: "zoom", factor: zoom });
+    if (orbit[0] || orbit[1]) moveCamera({ kind: "orbit", dx: orbit[0], dy: orbit[1] });
+    if (pan[0] || pan[1]) moveCamera({ kind: "pan", dx: pan[0], dy: pan[1], height: el.clientHeight });
+    if (zoom !== 1) moveCamera({ kind: "zoom", factor: zoom });
     pending.orbit = [0, 0];
     pending.pan = [0, 0];
     pending.zoom = 1;
@@ -40,7 +56,7 @@
       return;
     }
     hoverBusy = true;
-    const info = await pick(x, y).catch(() => null);
+    const info = await pickAt(x, y).catch(() => null);
     hoverBusy = false;
     // Dragging started or the pointer left meanwhile: drop the stale result.
     if (mode === null && hoverNext === null) consoleState.hover = info ? { info, x, y } : null;
@@ -75,7 +91,7 @@
     mode = null;
     el.releasePointerCapture(e.pointerId);
     if (!wasClick) return;
-    const info = await pick(e.clientX, e.clientY);
+    const info = await pickAt(e.clientX, e.clientY);
     if (!info) return;
     if (consoleState.measuring) {
       measurePick(info);
@@ -89,12 +105,20 @@
   async function ondblclick(e: MouseEvent) {
     // Two quick picks while measuring are not a request to zoom.
     if (consoleState.measuring) return;
-    const info = await pick(e.clientX, e.clientY);
+    const info = await pickAt(e.clientX, e.clientY);
     if (info) execute(`zoom byres index ${info.index}`);
-    else camera({ kind: "reset" });
+    else moveCamera({ kind: "reset" });
   }
 
   onMount(() => {
+    viewportMode().then(async (viewport) => {
+      kind = viewport;
+      if (viewport !== "web") return;
+      await tick(); // for the canvas to mount
+      await startWebViewport(canvas!, (message) => (consoleState.error = message)).catch((e) => {
+        consoleState.error = `Could not start the viewport: ${e}`;
+      });
+    });
     // Registered manually: wheel listeners must be non-passive to stop page scrolling.
     const onwheel = (e: WheelEvent) => {
       e.preventDefault();
@@ -125,13 +149,22 @@
   oncontextmenu={(e) => e.preventDefault()}
   role="application"
   aria-label="Molecular viewport"
-></div>
+>
+  {#if kind === "web"}<canvas bind:this={canvas}></canvas>{/if}
+</div>
 
 <style>
   .viewport {
     position: absolute;
     inset: 0;
     cursor: grab;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    /* The renderer's background, until the first frame. */
+    background: #040508;
   }
   .over-atom {
     cursor: pointer;
