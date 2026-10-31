@@ -718,30 +718,18 @@ fn message(message: String) -> CommandResult {
 }
 
 fn run_python(backend: Arc<Backend>, script: crate::scripting::Script, events: UnboundedSender<crate::scripting::ScriptEvent>) -> Outcome {
-    #[cfg(unix)]
-    {
-        match crate::scripting::run(backend, script, events) {
-            Ok(run) => {
-                let lines: Vec<&str> = run.output.trim_end().lines().collect();
-                let tail = if lines.len() > OUTPUT_LINES {
-                    std::iter::once("…").chain(lines[lines.len() - OUTPUT_LINES..].iter().copied()).collect::<Vec<_>>().join("\n")
-                } else {
-                    lines.join("\n")
-                };
-                if run.code == Some(0) {
-                    Ok(message(if tail.is_empty() { "done".into() } else { tail }))
-                } else {
-                    let code = run.code.map_or("a signal".into(), |c| format!("code {c}"));
-                    Err(CommandError::whole(if tail.is_empty() { format!("Python exited with {code}") } else { tail }))
-                }
-            }
-            Err(e) => Err(CommandError::whole(e)),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (backend, script, events);
-        Err(CommandError::whole("running scripts needs macOS or Linux for now"))
+    let run = crate::scripting::run(backend, script, events).map_err(CommandError::whole)?;
+    let lines: Vec<&str> = run.output.trim_end().lines().collect();
+    let tail = if lines.len() > OUTPUT_LINES {
+        std::iter::once("…").chain(lines[lines.len() - OUTPUT_LINES..].iter().copied()).collect::<Vec<_>>().join("\n")
+    } else {
+        lines.join("\n")
+    };
+    if run.code == Some(0) {
+        Ok(message(if tail.is_empty() { "done".into() } else { tail }))
+    } else {
+        let code = run.code.map_or("a signal".into(), |c| format!("code {c}"));
+        Err(CommandError::whole(if tail.is_empty() { format!("Python exited with {code}") } else { tail }))
     }
 }
 

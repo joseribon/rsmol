@@ -10,7 +10,6 @@ mod app;
 mod backend;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(unix)]
 mod scripting;
 mod text_input;
 mod theme;
