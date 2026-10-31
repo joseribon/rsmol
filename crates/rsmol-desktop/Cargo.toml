@@ -25,3 +25,8 @@ wgpui = "0.3.6"
 # Same versions as wgpui, so the AppKit bindings are shared rather than duplicated.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# libc 0.2.190 dropped `ENOATTR` on Linux, which xattr 0.2.3 (under wgpui's HTTP client) still
+# uses. Remove the pin once wgpui moves to a newer xattr.
+libc = "=0.2.189"
