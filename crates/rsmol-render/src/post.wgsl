@@ -14,6 +14,9 @@ struct Post {
     outline_px: f32,
     fog_near: f32,
     fog_far: f32,
+    /// 1 when the output is a plain (non-sRGB) format, so the shader must apply the sRGB curve
+    /// that an sRGB target would apply on write.
+    encode_srgb: f32,
 }
 
 @group(0) @binding(0) var<uniform> p: Post;
@@ -85,6 +88,16 @@ fn ambient_occlusion(px: vec2<i32>, pos: vec3<f32>) -> f32 {
     return clamp(1.0 - p.ao_strength * occlusion / f32(SAMPLES), 0.0, 1.0);
 }
 
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3(0.0031308));
+}
+
+fn output(c: vec3<f32>) -> vec4<f32> {
+    return vec4(select(c, linear_to_srgb(clamp(c, vec3(0.0), vec3(1.0))), p.encode_srgb > 0.5), 1.0);
+}
+
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let px = vec2<i32>(frag.xy);
@@ -107,7 +120,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let edge = z - nearest > max(1.0, nearest * 0.03);
 
     if d >= 1.0 {
-        return vec4(select(background, mix(background, p.outline.rgb, p.outline.a), edge), 1.0);
+        return output(select(background, mix(background, p.outline.rgb, p.outline.a), edge));
     }
 
     let pos = view_pos(px);
@@ -117,5 +130,5 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     if edge {
         color = mix(color, p.outline.rgb, p.outline.a);
     }
-    return vec4(color, 1.0);
+    return output(color);
 }

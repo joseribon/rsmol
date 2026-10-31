@@ -84,6 +84,8 @@ struct PostUniforms {
     outline_px: f32,
     fog_near: f32,
     fog_far: f32,
+    encode_srgb: f32,
+    _pad: [f32; 3],
 }
 
 struct Instances {
@@ -117,6 +119,8 @@ struct Targets {
 }
 
 pub struct Renderer {
+    /// The output is not an sRGB format, so the composite applies the sRGB curve itself.
+    encode_srgb: bool,
     sphere_pipeline: wgpu::RenderPipeline,
     stick_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
@@ -165,7 +169,8 @@ enum Kind {
 }
 
 impl Renderer {
-    /// `output_format` is the format of the views later passed to `render`.
+    /// `output_format` is the format of the views later passed to `render`. Plain (non-sRGB)
+    /// formats receive sRGB-encoded values, as an sRGB format would store them.
     pub fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
         Self::with_scene_format(device, output_format, SCENE_FORMAT, width, height)
     }
@@ -346,6 +351,7 @@ impl Renderer {
             dashes: None,
             targets,
             scene_format,
+            encode_srgb: !output_format.is_srgb(),
             style: Style::default(),
         }
     }
@@ -466,6 +472,8 @@ impl Renderer {
             outline_px: s.outline_px,
             fog_near,
             fog_far,
+            encode_srgb: if self.encode_srgb { 1.0 } else { 0.0 },
+            _pad: [0.0; 3],
         };
         queue.write_buffer(&self.post_uniforms, 0, bytemuck::bytes_of(&post));
 
