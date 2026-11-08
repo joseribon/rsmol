@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=rsmol
+GenericName=Molecular Viewer
+Comment=View and script molecular structures with PyMOL's command language
+Exec=rsmol-desktop %f
+Icon=io.github.joseribon.rsmol
+Terminal=false
+Categories=Science;Chemistry;Biology;Education;
+Keywords=molecule;protein;structure;PDB;mmCIF;PyMOL;chemistry;biology;
+MimeType=chemical/x-pdb;chemical/x-cif;chemical/x-mmcif;
+StartupWMClass=io.github.joseribon.rsmol

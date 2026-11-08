@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata: what software centres (GNOME Software, KDE Discover, Flathub) show. -->
+<component type="desktop-application">
+  <id>io.github.joseribon.rsmol</id>
+  <name>rsmol</name>
+  <summary>View and script molecular structures</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="io.github.joseribon">
+    <name>joseribon</name>
+  </developer>
+  <description>
+    <p>
+      A molecular viewer in the spirit of PyMOL, rewritten from scratch in Rust: PyMOL's
+      selection and command language, with a modern interface and a native GPU renderer.
+    </p>
+    <ul>
+      <li>Cartoon, sticks, spheres and molecular surfaces, with ambient occlusion, outlines and fog</li>
+      <li>PyMOL selections with live feedback as you type</li>
+      <li>Measurements, alignment, undo/redo and self-contained session files</li>
+      <li>Secondary structure computed when files lack it, e.g. for AlphaFold models</li>
+      <li>Python scripting against the open window</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.joseribon.rsmol.desktop</launchable>
+  <url type="homepage">https://github.com/joseribon/rsmol</url>
+  <url type="bugtracker">https://github.com/joseribon/rsmol/issues</url>
+  <url type="vcs-browser">https://github.com/joseribon/rsmol</url>
+  <categories>
+    <category>Science</category>
+    <category>Chemistry</category>
+    <category>Biology</category>
+  </categories>
+  <keywords>
+    <keyword>molecule</keyword>
+    <keyword>protein</keyword>
+    <keyword>PDB</keyword>
+    <keyword>PyMOL</keyword>
+  </keywords>
+  <provides>
+    <binary>rsmol-desktop</binary>
+    <mediatype>chemical/x-pdb</mediatype>
+    <mediatype>chemical/x-cif</mediatype>
+  </provides>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">640</display_length>
+  </requires>
+  <!-- Flathub requires at least one screenshot: add one from the repo, e.g.
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/joseribon/rsmol/main/packaging/screenshots/main.png</image>
+      <caption>Hemoglobin as cartoon with ligands as sticks</caption>
+    </screenshot>
+  </screenshots>
+  -->
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.2.1" date="2026-11-08"/>
+  </releases>
+</component>
