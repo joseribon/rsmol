@@ -78,10 +78,12 @@ mod unix {
     }
 
     /// The bundled `rsmol` Python package: next to the executable when installed (in the bundle's
-    /// Resources on macOS), else the source tree.
+    /// Resources on macOS), else the source tree. Symlinks are resolved first: launchers such as
+    /// `~/.local/bin/rsmol` or Homebrew's link point at the real binary inside the install.
     fn python_path() -> PathBuf {
         let exe_dir = std::env::current_exe()
             .ok()
+            .map(|e| e.canonicalize().unwrap_or(e))
             .and_then(|e| e.parent().map(Path::to_path_buf))
             .unwrap_or_default();
         [

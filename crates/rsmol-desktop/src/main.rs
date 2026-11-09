@@ -44,7 +44,8 @@ fn main() {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(800.0)), cx))),
             titlebar: Some(TitlebarOptions { title: Some("rsmol".into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(13.0))) }),
             window_min_size: Some(size(px(640.0), px(420.0))),
-            app_id: Some("dev.rsmol.app".into()),
+            // Matches the .desktop file name, so Linux desktops show the right icon and name.
+            app_id: Some("io.github.joseribon.rsmol".into()),
             // Development aid: a window that floats above others can be screenshotted while
             // a terminal has focus (a covered window is never painted).
             kind: if std::env::var_os("RSMOL_ON_TOP").is_some() { WindowKind::PopUp } else { WindowKind::Normal },

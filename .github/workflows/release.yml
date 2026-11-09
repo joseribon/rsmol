@@ -1,0 +1,137 @@
+# Builds the desktop app's release archives and, for version tags (v*), publishes them as a GitHub
+# release with a SHA256SUMS file. install.sh and the Homebrew cask download from these releases.
+#
+#   rsmol-macos-universal.zip    rsmol.app for Apple silicon and Intel
+#   rsmol-linux-x86_64.tar.gz    bin/ + share/ tree, glibc 2.35+ (Ubuntu 22.04, Debian 12, Fedora 36…)
+#   rsmol-linux-aarch64.tar.gz
+#
+# To release: bump `version` in Cargo.toml (and the <releases> entry in the metainfo), merge,
+# then push a tag with the same version, e.g. `git tag v0.3.0 && git push origin v0.3.0`.
+# Running the workflow by hand builds the archives as workflow artifacts without releasing.
+#
+# macOS builds are signed ad hoc. For a Developer ID signature and notarization, add the
+# repository secrets MACOS_CERTIFICATE (base64 .p12), MACOS_CERTIFICATE_PASSWORD,
+# MACOS_SIGN_IDENTITY ("Developer ID Application: …"), APPLE_ID, APPLE_TEAM_ID and
+# APPLE_APP_PASSWORD (an app-specific password); the steps below pick them up when present.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported Ubuntu, so the binary runs on any distro with glibc 2.35+.
+          - { arch: x86_64, runner: ubuntu-22.04 }
+          - { arch: aarch64, runner: ubuntu-22.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $version"; exit 1; }
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked --release -p rsmol-desktop
+      - name: Package
+        run: packaging/package.sh linux ${{ matrix.arch }} target/release/rsmol-desktop dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/*
+
+  macos:
+    name: macos (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --locked --release -p rsmol-desktop --target aarch64-apple-darwin
+          cargo build --locked --release -p rsmol-desktop --target x86_64-apple-darwin
+          lipo -create -output rsmol-desktop \
+            target/aarch64-apple-darwin/release/rsmol-desktop \
+            target/x86_64-apple-darwin/release/rsmol-desktop
+          lipo -info rsmol-desktop
+      - name: Import signing certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 16)
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+      - name: Package
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: packaging/package.sh macos universal rsmol-desktop dist
+      - name: Notarize
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        if: env.APPLE_ID != ''
+        run: |
+          xcrun notarytool submit dist/rsmol-macos-universal.zip --wait \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          # Staple the ticket to the app so it opens offline, then re-zip it.
+          ditto -x -k dist/rsmol-macos-universal.zip "$RUNNER_TEMP/notarized"
+          xcrun stapler staple "$RUNNER_TEMP/notarized/rsmol.app"
+          rm dist/rsmol-macos-universal.zip
+          ditto -c -k --keepParent "$RUNNER_TEMP/notarized/rsmol.app" dist/rsmol-macos-universal.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos
+          path: dist/*
+
+  publish:
+    name: publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * | tee SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+            install.sh
+          generate_release_notes: true
