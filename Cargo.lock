@@ -4778,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "flate2",
@@ -4788,7 +4788,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-desktop"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dirs 6.0.0",
  "env_logger",
@@ -4810,7 +4810,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-py"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "glam",
  "png",
@@ -4826,7 +4826,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-render"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -4837,7 +4837,7 @@ dependencies = [
 
 [[package]]
 name = "rsmol-viewer"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "glam",
  "png",
