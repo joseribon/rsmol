@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/joseribon/rsmol/main/install.sh | s
 ```
 
 This puts `rsmol.app` in `/Applications` on macOS, and the app with its menu entry and icon under
-`~/.local` on Linux, plus an `rsmol` command in `~/.local/bin`. Add `-s -- --version 0.2.1` after
+`~/.local` on Linux, plus an `rsmol` command in `~/.local/bin`. Add `-s -- --version 0.3.0` after
 `sh` for a specific release, or `-s -- --uninstall` to remove it. The archives are also on the
 [releases page](https://github.com/joseribon/rsmol/releases). On Windows, build from source as
 below.
